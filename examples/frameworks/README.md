@@ -11,17 +11,16 @@ The examples include the following frameworks and examples:
 
 ### Fastai
 
-* [Fastai with Tensorboard](fastai/fastai_with_tensorboard.py) - Integrating **ClearML** into code which uses [fastai](https://github.com/fastai/fastai) 
+* [Fastai with Tensorboard](fastai/fastai_with_tensorboard.py) - Integrating **ClearML** into code that uses [fastai](https://github.com/fastai/fastai) 
   and TensorBoard.
 
 ### Hydra
-* [Hydra](hydra/hydra_example.py) - Creating and updating a configuration object using Hydra and reporting it to a **ClearML** Task.
-
+* [Hydra](hydra/hydra_example.py) - Creating and updating a configuration object using Hydra, and reporting it to a **ClearML** Task.
 
 ### Keras
 
-* [Keras with Matplotlib - Jupyter Notebook](keras/jupyter.ipynb) - **ClearML** running in Jupyter Notebook with Keras, 
-  Matplotlib, and automatic logging.
+* [Keras with Matplotlib - Jupyter Notebook](keras/jupyter_keras_matplotlib.ipynb) - Integrating ClearML in Jupyter 
+  Notebook that uses Keras and Matplotlib. Demonstrates automatic logging and integrates plots and training.
 * [Keras with TensorBoard](keras/keras_tensorboard.py) - Integrating **ClearML** into code which uses Keras and TensorBoard.
 * [Keras with TensorBoard - Jupyter Notebook](keras/jupyter_keras_TB_example.ipynb) - The "Keras with TensorBoard" example 
   in a Jupyter Notebook.
@@ -34,12 +33,12 @@ Keras examples include a folder of legacy examples for versions of TensorFlow ol
 
 ### Keras Tuner
 
-* [Keras Tuner Cifar](kerastuner/keras_tuner_cifar.py) - Integrating **ClearML** into code which uses the Keras Tuner `Hyperband` 
+* [Keras Tuner Cifar](kerastuner/keras_tuner_cifar.py) - Integrating **ClearML** into code that uses the Keras Tuner `Hyperband` 
   tuner to optimize hyperparameters for training a network on a CIFAR10 dataset. 
 
 ### Matplotlib
 
-* [Matplotlib](matplotlib/matplotlib_example.py) - Integrating **ClearML** into code which uses Matplotlib to plot scatter 
+* [Matplotlib](matplotlib/matplotlib_example.py) - Integrating **ClearML** into code that uses Matplotlib to plot scatter 
   diagrams, and show images.
 * [Matplotlib - Jupyter Notebook](matplotlib/jupyter_matplotlib_example.ipynb) - The "Matplotlib" example in a 
   Jupyter Notebook.
@@ -51,13 +50,14 @@ These examples demonstrate integrating **ClearML** into code that uses PyTorch.
 created with PyTorch, including model checkpoints (snapshots), and output to the console.-->
 * [PyTorch MNIST](pytorch/pytorch_mnist.py) - Integrating **ClearML** into code that trains a simple deep neural network 
   on the PyTorch built-in [MNIST](https://pytorch.org/vision/stable/datasets.html#mnist) dataset.
-* [PyTorch TensorBoard Toy](pytorch/tensorboard_toy_pytorch.py) - **ClearML** with PyTorch and TensorBoard to log debug sample images.
-* [PyTorch with Matplotlib](pytorch/pytorch_matplotlib.py) - **ClearML** with PyTorch and Matplotlib.
-* [PyTorch with TensorBoard](pytorch/pytorch_tensorboard.py) - **ClearML** with PyTorch and TensorBoard.
-* [PyTorch with TensorBoardX](pytorch/pytorch_tensorboardx.py) - **ClearML** with PyTorch and TensorBoardX.
+* [PyTorch TensorBoard Toy](pytorch/tensorboard_toy_pytorch.py) - Integrating **ClearML** with PyTorch and TensorBoard to log debug sample images.
+* [PyTorch with Matplotlib](pytorch/pytorch_matplotlib.py) - Integrating **ClearML** with PyTorch and Matplotlib.
+* [PyTorch with TensorBoard](pytorch/pytorch_tensorboard.py) - Integrating **ClearML** with PyTorch and TensorBoard.
+* [PyTorch with TensorBoardX](pytorch/pytorch_tensorboardx.py) - Integrating **ClearML** with PyTorch and TensorBoardX.
 
 #### Notebooks
 Jupyter Notebooks that demonstrate integrating **ClearML** into PyTorch scripts that use various media.
+
 ##### Audio
 
 * [Audio Preprocessing - Jupyter Notebook](pytorch/notebooks/audio/audio_preprocessing_example.ipynb) - Integrating 
@@ -75,14 +75,25 @@ Jupyter Notebooks that demonstrate integrating **ClearML** into PyTorch scripts 
   UrbanSound8K dataset for **image** classification.
 
 ##### Tables
+
+Demonstrates a pipeline with concurrent tasks using tabular data. 
+      $$$$ REWRITE
+* [Tabular ML Pipeline](pytorch/notebooks/table/tabular_ml_pipeline.ipynb) - A pipeline with nodes that run concurrently 
+  to preprocess two sets of data, train on each, and select the better model. The data is tabular.
+  * [Preprocessing and Encoding](pytorch/notebooks/table/preprocessing_and_encoding.ipynb) - A data preprocessing Task (preprocessing_and_encoding.ipynb)
+  * [Tabular Predictor](pytorch/notebooks/table/train_tabular_predictor.ipynb) - Training and validation of the model using
+  the data from the previous step's artifacts. A training Task (train_tabular_predictor.ipynb)
+  * [Pick Best Model](pytorch/notebooks/table/pick_best_model.ipynb) - Based on criteria, script picks the model that preformed
+  best from the concurrent tasks. A better model comparison Task (pick_best_model.ipynb)  
+
+  
+* [Download and Split](pytorch/notebooks/table/download_and_split.ipynb) - Downloading data Task
 $$$
-* [Tabular Data Preprocessing](pytorch/notebooks/table/download_and_preprocessing.ipynb) - **ClearML** stores downloaded training as artifacts.
-* See the pipeline example using tabular data, [Pipeline with Concurrent Steps - Tabular Data](pytorch/notebooks/table/train_tabular_predictor.ipynb ***CHECK IF THIS RIGHT< COULD BE THE TABULAR ML PIPELINE FILE).
-      $$$ADD SOMEWHERE - * [Pipeline with Concurrent Steps - Tabular Data](pytorch/notebooks/table/tabular_training_pipeline.md) - A pipeline with nodes that run concurrently to preprocess two sets of data, train on each, and select the better model. The data is tabular.
-* [Download and Split](pytorch/notebooks/table/download_and_split.ipynb)
-* [Pick Best Model](pytorch/notebooks/table/pick_best_model.ipynb)
-* [Preprocessing and Encoding](pytorch/notebooks/table/preprocessing_and_encoding.ipynb)
-* [Tabular ML Pipeline](pytorch/notebooks/table/tabular_ml_pipeline.ipynb)
+* [Tabular Data Preprocessing](pytorch/notebooks/table/download_and_preprocessing.ipynb) - **ClearML** stores downloaded 
+    training as artifacts. 
+  Demonstrates ClearML storing preprocessed tabular data as artifacts, and explicitly reporting the tabular data in the 
+  ClearML Web UI.  This tabular data is prepared for another script, `train_tabular_predictor.ipynb`, which trains a network with it.
+
 
 ##### Text
 
@@ -104,7 +115,7 @@ uses PyTorch Lightening
 
 ### TensorBoardX
 
-* [TensorBoardX](tensorboardx/pytorch_tensorboardX.py) - Integrating **ClearML** into code which uses PyTorch and TensorBoardX.
+* [TensorBoardX](tensorboardx/pytorch_tensorboardX.py) - Integrating **ClearML** into code that uses PyTorch and TensorBoardX.
 * [TensorboardX Movie Example](tensorboardx/moviepy_tensorboardx.py) - $$$Integrating **ClearML** into code which uses PyTorch and TensorBoardX.
 
 ### TensorFlow
