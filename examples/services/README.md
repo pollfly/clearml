@@ -1,7 +1,7 @@
 Services 
 ---
 
-The scripts in this folder are configurable services examples that perform various functions, 
+The Services scripts are configurable services examples that perform various functions, 
 which continue running on **ClearML Server**. They execute in [ClearML Agent services mode](https://clear.ml/docs/latest/docs/clearml_agent#services-mode). 
 
 The services include: 

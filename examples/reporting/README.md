@@ -5,7 +5,8 @@ The Reporting Examples demonstrate **ClearML**'s automatic and explicit reportin
 
 * [3D Plots Reporting](3d_plots_reporting.py) - Reporting series as a surface plot and as a 3D scatter plot.
 * [Artifacts](artifacts.py) - Uploading objects (other than models) to storage as experiment artifacts.
-* Artifacts Retrieval
+  * [Artifacts Retrieval](artifacts_retrieval.py) - Retrieving and printing another Task's artifacts. The [Artifacts](artifacts.py)
+  script's artifacts are being retrieved so execute that script before executing this one.
 * [Explicit Reporting - Jupyter Notebook](jupyter_logging_example.ipynb) - Several explicit reporting examples 
   running in a Jupyter Notebook, including scalars, plots, media (audio, HTML, images, and video), and text.
 * [HTML Reporting](html_reporting.py) - Reporting local HTML files and HTML by URL.

@@ -1,7 +1,7 @@
 Frameworks Examples 
 ---
 
-The examples in this folder demonstrate the integration of **ClearML** into scripts that utilize various frameworks. 
+The Framework Examples demonstrate the integration of **ClearML** into scripts that utilize various frameworks. 
 
 The examples include the following frameworks and examples:
 
@@ -44,8 +44,6 @@ Keras examples include a folder of legacy examples for versions of TensorFlow ol
   Jupyter Notebook.
 
 ### PyTorch
-
-These examples demonstrate integrating **ClearML** into code that uses PyTorch.
 <!--* $$$[Manual Model Upload](pytorch/manual_model_upload.md) - **ClearML** tracking of a manually configured model 
 created with PyTorch, including model checkpoints (snapshots), and output to the console.-->
 * [PyTorch MNIST](pytorch/pytorch_mnist.py) - Integrating **ClearML** into code that trains a simple deep neural network 
@@ -77,22 +75,21 @@ Jupyter Notebooks that demonstrate integrating **ClearML** into PyTorch scripts 
 ##### Tables
 
 Demonstrates a pipeline with concurrent tasks using tabular data. 
-      $$$$ REWRITE
-* [Tabular ML Pipeline](pytorch/notebooks/table/tabular_ml_pipeline.ipynb) - A pipeline with nodes that run concurrently 
-  to preprocess two sets of data, train on each, and select the better model. The data is tabular.
-  * [Preprocessing and Encoding](pytorch/notebooks/table/preprocessing_and_encoding.ipynb) - A data preprocessing Task (preprocessing_and_encoding.ipynb)
+* [Tabular ML Pipeline](pytorch/notebooks/table/tabular_ml_pipeline.ipynb) - The pipeline controller Task for a pipeline 
+  with nodes that run concurrently to preprocess two sets of **tabular** data, train on each, and select the better model. The pipeline consists of the following
+  steps:
+  * [Preprocessing and Encoding](pytorch/notebooks/table/preprocessing_and_encoding.ipynb) - A data preprocessing Task. 
   * [Tabular Predictor](pytorch/notebooks/table/train_tabular_predictor.ipynb) - Training and validation of the model using
-  the data from the previous step's artifacts. A training Task (train_tabular_predictor.ipynb)
-  * [Pick Best Model](pytorch/notebooks/table/pick_best_model.ipynb) - Based on criteria, script picks the model that preformed
-  best from the concurrent tasks. A better model comparison Task (pick_best_model.ipynb)  
+  the data from the previous step's artifacts.
+  * [Pick Best Model](pytorch/notebooks/table/pick_best_model.ipynb) - A comparison Task to pick out the best model.  
 
   
 * [Download and Split](pytorch/notebooks/table/download_and_split.ipynb) - Downloading data Task
 $$$
-* [Tabular Data Preprocessing](pytorch/notebooks/table/download_and_preprocessing.ipynb) - **ClearML** stores downloaded 
-    training as artifacts. 
-  Demonstrates ClearML storing preprocessed tabular data as artifacts, and explicitly reporting the tabular data in the 
-  ClearML Web UI.  This tabular data is prepared for another script, `train_tabular_predictor.ipynb`, which trains a network with it.
+* [Download and Preprocessing](pytorch/notebooks/table/download_and_preprocessing.ipynb) - ClearML storing preprocessed 
+  tabular data as artifacts, and explicitly reporting the tabular data in the 
+  ClearML Web UI. 
+  This tabular data is prepared for another script, `train_tabular_predictor.ipynb`, which trains a network with it.
 
 
 ##### Text
@@ -116,7 +113,8 @@ uses PyTorch Lightening
 ### TensorBoardX
 
 * [TensorBoardX](tensorboardx/pytorch_tensorboardX.py) - Integrating **ClearML** into code that uses PyTorch and TensorBoardX.
-* [TensorboardX Movie Example](tensorboardx/moviepy_tensorboardx.py) - $$$Integrating **ClearML** into code which uses PyTorch and TensorBoardX.
+* [TensorBoardX Movie Example](tensorboardx/moviepy_tensorboardx.py) - Integrating **ClearML** into code which uses PyTorch and TensorBoardX,
+  which creates videos in TensorBoard that are logged automatically to ClearML.
 
 ### TensorFlow
 
@@ -125,13 +123,14 @@ uses PyTorch Lightening
   TensorBoard.
 * [TensorBoard Toy](tensorflow/tensorboard_toy.py) - **ClearML** automatic logging of TensorBoard scalars, histograms, 
   images, and text, as well as all other console output and TensorFlow Definitions.
-* [TensorFlow MNIST](tensorflow/tensorflow_mnist.py) - Integrating **ClearML** into code which uses TensorFlow and Keras 
-  to train a neural network on the Keras built-in [MNIST](https://www.tensorflow.org/api_docs/python/tf/keras/datasets/mnist.md) handwritten digits dataset.
+* [TensorFlow MNIST](tensorflow/tensorflow_mnist.py) - Integrating **ClearML** into code that uses TensorFlow and Keras 
+  to train a neural network on the Keras built-in [MNIST](https://www.tensorflow.org/api_docs/python/tf/keras/datasets/mnist.md) 
+  dataset.
 * [absl flags](tensorflow/absl_flags.py) - Integrating **ClearML** into code that uses absl.flags and then automatically 
   logs the parameters to the Task. $$RIGHT LOCATION?
 
 :::note
-TensorFlow examples include legacy an examples folder for versions of TensorFlow older than v2.0. 
+TensorFlow examples include a legacy examples folder for versions of TensorFlow older than v2.0. 
 :::
 
 

@@ -1,7 +1,7 @@
 Distributed Examples
 ---
 
-The distributed examples demonstrate distributed training using **ClearML**. 
+The Distributed Examples demonstrate distributed training using **ClearML**. 
 
 The Examples include:
 * [Subprocess](subprocess_example.py) - Creating multiple subprocesses that interact with and report to a main Task.
