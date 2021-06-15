@@ -19,18 +19,18 @@ The Examples folder includes the following sections:
 * [Automation](automation/README.md) - Automating processes when using ClearML.
 * [ClearML Agent](clearml_agent/README.md) - Usage examples of ClearML Agent.
 * [Distributed](distributed/README.md) - Distributed training using ClearML.
-* [Frameworks](frameworks/README.md) - Integrating **ClearML** into code that uses various frameworks, including:
+* [Frameworks](frameworks/README.md) - Using **ClearML** with other Python packages, including:
   * AutoKeras
   * Fastai
   * Hydra
-  * Keras (includes legacy examples folder for versions of TensorFlow older than v2.0.)
+  * Keras (includes legacy examples of TensorFlow older than v2.0.)
   * Keras Tuner
   * Matplotlib 
   * PyTorch 
   * Pytorch Lightening 
   * scikit-learn 
   * TensorBoardX 
-  * TensorFlow (includes legacy examples folder for versions of TensorFlow older than v2.0.)
+  * TensorFlow (includes legacy examples of TensorFlow older than v2.0.)
   * XGBoost 
 * [Optimization](optimization/hyper-parameter-optimization/README.md) - **ClearML**'s automated hyperparameter optimization.  
 * [Pipeline](pipeline/README.md) - A basic pipeline to download data, process it, and a train a network. 
