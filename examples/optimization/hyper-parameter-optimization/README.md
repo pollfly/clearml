@@ -1,7 +1,7 @@
 Optimization Examples
 ---
 
-These Optimization Examples demonstrate **ClearML**'s automated hyperparameter optimization using the `HyperParameterOptimizer`
+The Optimization Examples demonstrate **ClearML**'s automated hyperparameter optimization using the `HyperParameterOptimizer`
 class.
 
 * [Hyper Parameter Optimizer](hyper_parameter_optimizer.py) - This script is the hyperparameter optimization controller. 
