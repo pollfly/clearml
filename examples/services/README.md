@@ -9,6 +9,6 @@ The services include:
   you configure.
 * [Cleanup Service](cleanup/cleanup_service.py) - Deletes Archived Tasks, and their associated artifacts and debug samples, 
   based on configurable parameter criteria.
-* [Monitoring Service Posting Slack Alerts](monitoring/slack_alerts.py) - Monitors Task completion/failure based on 
+* [Monitoring Service Posting Slack Alerts](monitoring/slack_alerts.py) - Monitors Task completion / failure based on 
   configurable parameter criteria and post alerts to your Slack channel.
   

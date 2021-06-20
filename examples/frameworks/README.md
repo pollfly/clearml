@@ -25,7 +25,7 @@ including:
 * Gradient Booster
   * [XGBoost](#xgboost) 
   * [LightGBM](#lightgbm)
-
+  
 <!--In many of the examples, depending on the library used, **ClearML** automatically captures a wide range of artifacts and 
 outputs from the code. ClearML automatically logs information when standard libraries, like TensorFlow, are used, otherwise, 
 information can also be logged explicitly. -->
@@ -40,7 +40,7 @@ The following frameworks and examples are included:
 
 ### Fastai
 * [Fastai with Tensorboard](fastai/fastai_with_tensorboard.py) - Training a simple deep neural network on the [fastai](https://github.com/fastai/fastai) 
-  built-in MNIST dataset. ClearML automatically logs   TensorBoard outputs, including a histogram, from the fastai 
+  built-in MNIST dataset. **ClearML** automatically logs TensorBoard outputs, including a histogram, from the fastai 
   `LearnerTensorboardWriter` callback.
 
 ### Hydra
@@ -49,10 +49,9 @@ The following frameworks and examples are included:
 
 ### Ignite 
 * [Cifar Ignite](ignite/cifar_ignite.py) - Training a network on a CIFAR10 dataset, using Ignite's `TensorboardLogger`, and 
-the handlers that can be attached to it. Using ClearML's `StorageManager`, the dataset is cached with the 
-  `get_local_copy` method. parameters are explicitly logged, using the `task.connect` method. Scalars are logged with 
-`TensorboardLogger` and the model is saved using `torch.save`, both of which **ClearML** automatically 
-logs. 
+the handlers that can be attached to it. Scalars are logged with `TensorboardLogger` and the model is saved using 
+  `torch.save`, both of which **ClearML** automatically logs. Using ClearML's `StorageManager`, the dataset is cached with 
+  the `get_local_copy` method. Parameters are explicitly logged using the `task.connect` method.  
   
 
 ### Keras
@@ -61,12 +60,12 @@ training a simple deep neural network on the Keras built-in [MNIST](https://kera
   dataset. ClearML automatically logs TensorFlow Definitions. A parameter dictionary is logged explicitly by connecting 
   it to the Task with the `Task.connect` method. The script calls Matplotlib methods to create several sample plots and to 
   log debug sample images, and TensorBoard methods to plot histograms for layer density. These plots and images are 
-  automatically logged by **ClearML**
+  automatically logged by **ClearML**.
    
-* [Keras with TensorBoard](keras/keras_tensorboard.py) - Similar to the above example, except that the script uses Tensorboard. 
-Training a simple deep NN on the [MNIST](https://keras.io/api/datasets/mnist/#load_data-function) dataset using Keras. 
-**ClearML** automatically logs the argparse arguments and TensorFlow Definitions.
-In the experiment code, a configuration dictionary is connected to the Task by calling the `Task.connect` method.
+* [Keras with TensorBoard](keras/keras_tensorboard.py) - Training a simple deep NN on the 
+  [MNIST](https://keras.io/api/datasets/mnist/#load_data-function) dataset using Keras. **ClearML** automatically logs 
+  the argparse arguments and TensorFlow Definitions. In the experiment code, a configuration dictionary is connected to 
+  the Task by calling the `Task.connect` method.
 
 * [Keras with TensorBoard - Jupyter Notebook](keras/jupyter_keras_TB_example.ipynb) - The "Keras with TensorBoard" example 
   in a Jupyter Notebook.
@@ -77,7 +76,7 @@ Keras examples include a folder of legacy examples for versions of TensorFlow ol
 
 ### Keras Tuner
 * [Keras Tuner Cifar](kerastuner/keras_tuner_cifar.py) - Using Keras Tuner `Hyperband` 
-  tuner to optimize hyperparameters for training a network on a CIFAR10 dataset. When the Hyperband object is created, 
+  tuner to optimize hyperparameters for training a network on a CIFAR10 dataset. When the `Hyperband` object is created, 
   the `ClearMLTunerLogger` is specified as the Keras Tuner logger. **ClearML** automatically logs scalars and a tabular 
   summary of hyperparameters tested and their metrics. **ClearML** also automatically logs the parameters of each experiment 
   run in the hyperparameter search separately.
@@ -85,7 +84,7 @@ Keras examples include a folder of legacy examples for versions of TensorFlow ol
 
 ### LightGBM
 * [LightGBM Example](lightgbm/lightgbm_example.py) - Training and loading a model using **LightGBM**. **ClearML** automatically
-logs all the information including parameters, the model, and metrics.
+logs all information logged by LightLGB, including parameters, the model, and metrics.
 
 
 ### Matplotlib
@@ -101,10 +100,9 @@ logs all the information including parameters, the model, and metrics.
 * [Pytorch Distributed](pytorch/pytorch_distributed_example.py) - Using the PyTorch Distributed Communications Package,
   which initializes a main Task and spawns subprocesses, each for an instance of that Task. 
   The Task in each subprocess trains a neural network over a partitioned dataset, and reports artifacts, scalars, and 
-  hyperparameters to the main Task.
-  The artifacts and scalars are explicitly reported with `Task.upload_artifact` and `Logger.report_scalar` methods respectively. 
-  A parameter dictionary is logged explicitly with the `Task.connect` method. **ClearML automatically** logs the command 
-  line options defined using argparse.
+  hyperparameters to the main Task. The artifacts and scalars are explicitly reported with `Task.upload_artifact` and 
+  `Logger.report_scalar` methods respectively. A parameter dictionary is logged explicitly with the `Task.connect` method. 
+  **ClearML** automatically logs the command line options defined using argparse.
 
   
 * [PyTorch MNIST](pytorch/pytorch_mnist.py) - Training a simple deep neural network on the PyTorch built-in 
@@ -116,8 +114,7 @@ logs all the information including parameters, the model, and metrics.
   The code instantiates a TensorBoard `SummaryWriter` object to log debug sample images, which **ClearML** captures. 
   
 * [PyTorch with Matplotlib](pytorch/pytorch_matplotlib.py) - Logging plots with PyTorch and Matplotlib.
-The script calls Matplotlib methods to show images. **ClearML** automatically logs the images as 
-  debug samples.
+The script calls Matplotlib methods to show images, which **ClearML** automatically logs as debug samples.
 
 * [PyTorch with TensorBoard](pytorch/pytorch_tensorboard.py) - Training a simple deep neural network on the PyTorch built-in 
   [MNIST](https://pytorch.org/vision/stable/datasets.html#mnist) dataset. A TensorBoard `SummaryWriter` object is created
@@ -175,8 +172,8 @@ The scripts below demonstrate a pipeline with concurrent tasks using tabular dat
   
 ##### Text
 
-* [Text Classification](pytorch/notebooks/text/text_classification_AG_NEWS.ipynb) - Training a network to classify text 
-  in the `torchtext` AG_NEWS dataset, and then applying the model to predict the classification of sample text. 
+* [Text Classification](pytorch/notebooks/text/text_classification_AG_NEWS.ipynb) - Training a network to classify **text** 
+  in the `torchtext` AG_NEWS dataset, and then applying the model on a sample text. 
   Text, scalars, and console output are logged by calling TensorBoard methods, which are automatically captured by **ClearML**. 
   **ClearML** also automatically logs the command line options defined with argparse. A parameter dictionary is logged 
   explicitly with the `Task.connect` method.
@@ -194,25 +191,28 @@ The scripts below demonstrate a pipeline with concurrent tasks using tabular dat
   and `joblib`, as well as a scatter plot created by Matplotlib.
   
 * [scikit-learn with Matplotlib](scikit-learn/sklearn_matplotlib_example.py) - Using 
-  `scikit-learn` to determine cross-validated training and test scores, and `matplotlib` to plot the learning curves. 
+  `scikit-learn` to determine cross-validated training and test scores, and Matplotlib to plot the learning curves. 
   **ClearML** automatically logs the scatter diagrams for the learning curves.
   
 ### TensorBoardX
 
 * [TensorBoardX](tensorboardx/pytorch_tensorboardX.py) - Training a simple deep neural network on the PyTorch built-in MNIST dataset.
-The code creates a TensorBoardX `SummaryWriter` object to log scalars, debug samples, a text message to the console, 
+The code creates a TensorBoardX `SummaryWriter` object to log scalars, debug samples, and a text message to the console, 
   all of which **ClearML** automatically logs. **ClearML** also automatically logs the command line options defined with 
   argparse.
   
 * [TensorBoardX Movie Example](tensorboardx/moviepy_tensorboardx.py) - Using PyTorch to create video.
-  The code creates a TensorBoardX `SummaryWriter` object to log text and a video, which is automatically captured by **ClearML**. 
+  The code creates a TensorBoardX `SummaryWriter` object to log text and a video, which is automatically captured by **ClearML**
+  as debug samples. 
 
 ### TensorFlow
 
 The TensorFlow examples demonstrate **ClearML**'s automagical capabilities in scripts using TensorFlow.
+
 * [TensorBoard PR Curve](tensorflow/tensorboard_pr_curve.py) - Computing the probability of 
   generated colors belonging to a certain class. Tensorflow methods generate PR curves using the probabilities computed. 
   **ClearML** automatically logs the TensorBoard output, TensorFlow Definitions, and output to the console.
+  
 * [TensorBoard Toy](tensorflow/tensorboard_toy.py) - Demonstrating **ClearML**'s automatic logging of TensorBoard scalars, 
   histograms, images, and text, as well as all other console output and TensorFlow Definitions.
   
