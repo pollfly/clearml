@@ -105,6 +105,7 @@ class PipelineController(object):
                 project_name=pipeline_project or 'Pipelines',
                 task_name=pipeline_name or 'Pipeline {}'.format(datetime.now()),
                 task_type=Task.TaskTypes.controller,
+                auto_resource_monitoring=False,
             )
 
         self._auto_connect_task = bool(auto_connect_task) and bool(self._task)
@@ -672,7 +673,7 @@ class PipelineController(object):
         elif node.job.is_cached_task():
             node.executed = node.job.task_id()
         else:
-            node.job.launch(queue_name=node.queue or self._default_execution_queue)
+            return node.job.launch(queue_name=node.queue or self._default_execution_queue)
 
         return True
 
