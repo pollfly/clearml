@@ -1031,12 +1031,10 @@ class Task(_Task):
         :param str source_task: The Task to clone. Specify a Task object or a  Task ID. (Optional)
         :param str name: The name of the new cloned Task. (Optional)
         :param str comment: A comment / description for the new cloned Task. (Optional)
-        :param str parent: The Id of the parent Task of the new Task.
-
-            - If ``parent`` is not specified, then ``parent`` is set to ``source_task.parent``.
-            - If ``parent`` is not specified and ``source_task.parent`` is not available, then
-              ``parent`` set to to ``source_task``.
-
+        :param str parent: The Id of the parent Task of the new Task. <br/>
+            - If ``parent`` is not specified, then ``parent`` is set to ``source_task.parent``. <br/>
+            - If ``parent`` is not specified and ``source_task.parent`` is not available, then ``parent`` set to
+                to ``source_task``.
         :param str project: The Id of the project in which to create the new Task.
             If ``None``, the new task inherits the original Task's project. (Optional)
 
