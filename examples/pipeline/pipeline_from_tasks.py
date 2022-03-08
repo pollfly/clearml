@@ -28,16 +28,17 @@ pipe = PipelineController(
 
 pipe.set_default_execution_queue('default')
 
-pipe.add_step(name='stage_data', base_task_project='examples', base_task_name='Pipeline step 1 dataset artifact')
+pipe.add_step(name='stage_data', base_task_project='notexamples', base_task_name='Pipeline step 1 dataset artifact')
 pipe.add_step(name='stage_process', parents=['stage_data', ],
-              base_task_project='examples', base_task_name='Pipeline step 2 process dataset',
+              base_task_project='notexamples', base_task_name='Pipeline step 2 process dataset',
               parameter_override={'General/dataset_url': '${stage_data.artifacts.dataset.url}',
                                   'General/test_size': 0.25},
               pre_execute_callback=pre_execute_callback_example,
-              post_execute_callback=post_execute_callback_example
+              post_execute_callback=post_execute_callback_example,
+              cache_executed_step=False
               )
 pipe.add_step(name='stage_train', parents=['stage_process', ],
-              base_task_project='examples', base_task_name='Pipeline step 3 train model',
+              base_task_project='notexamples', base_task_name='Pipeline step 3 train model',
               parameter_override={'General/dataset_task_id': '${stage_process.id}'})
 
 # for debugging purposes use local jobs
@@ -46,4 +47,4 @@ pipe.add_step(name='stage_train', parents=['stage_process', ],
 # Starting the pipeline (in the background)
 pipe.start()
 
-print('done')
+print('done lalallalalaa')

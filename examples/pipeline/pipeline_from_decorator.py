@@ -61,8 +61,8 @@ def step_three(data):
 # The actual pipeline execution context
 # notice that all pipeline component function calls are actually executed remotely
 # Only when a return value is used, the pipeline logic will wait for the component execution to complete
-@PipelineDecorator.pipeline(name='custom pipeline logic', project='examples', version='0.0.5')
-def executing_pipeline(pickle_url, mock_parameter='mock'):
+@PipelineDecorator.pipeline(name='custom pipeline logic2', project='examples', version='0.0.5')
+def executing_pipeline(pickle_url, mock_parameter='bleep'):
     print('pipeline args:', pickle_url, mock_parameter)
 
     # Use the pipeline argument to start the pipeline and pass it ot the first step
@@ -76,10 +76,9 @@ def executing_pipeline(pickle_url, mock_parameter='mock'):
     # It waits for the creating step/function (`step_one`) to complete the execution
     print('launch step two')
     processed_data = step_two(data_frame)
-
     # Notice we can actually process/modify the returned values inside the pipeline logic context.
     # This means the modified object will be stored on the pipeline Task.
-    processed_data = [processed_data[0], processed_data[1]*2, processed_data[2], processed_data[3]]
+    processed_data = [processed_data[0], processed_data[1]*4, processed_data[2], processed_data[3]]
     print('launch step three')
     model = step_three(processed_data)
 
