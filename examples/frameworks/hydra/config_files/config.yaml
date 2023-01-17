@@ -3,6 +3,7 @@ dataset:
   data: rawdata.csv
   user: root
   password: password
-
+  number:
+    sub: 6
 pipeline:
   pipeline_1: my_pipeline
