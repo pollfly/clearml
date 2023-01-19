@@ -15,7 +15,7 @@ def my_app(cfg):
     logger.report_text("You can view your full hydra configuration under Configuration tab in the UI")
     print(OmegaConf.to_yaml(cfg))
     for i in range(40):
-        logger.report_scalar(title="title", series="number", value=cfg.foo.number+i, iteration=i)
+        logger.report_scalar(title="title", series="number", value=cfg.dataset.number.sub+i, iteration=i)
     logger.report_single_value(name="number", value=13)
     print("my metric name:")
     time.sleep(5)
