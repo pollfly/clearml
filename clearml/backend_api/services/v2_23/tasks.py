@@ -8070,7 +8070,7 @@ class GetAllRequest(Request):
     :param parent: Parent ID
     :type parent: str
     :param status_changed: List of status changed constraint strings (utcformat,
-        with an optional prefix modifier (\>,\>=, \<, \<=)
+        epoch) with an optional prefix modifier (\>,\>=, \<, \<=)
     :type status_changed: Sequence[str]
     :param search_text: Free text search query
     :type search_text: str
