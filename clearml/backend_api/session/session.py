@@ -84,6 +84,7 @@ class Session(TokenManager):
     _client = [(__package__.partition(".")[0], __version__)]
 
     api_version = '2.9'  # this default version should match the lowest api version we have under service
+    server_version = '1.0.0'
     max_api_version = '2.9'
     feature_set = 'basic'
     default_demo_host = "https://demoapi.demo.clear.ml"
@@ -197,9 +198,12 @@ class Session(TokenManager):
             raise ValueError("missing max request size")
 
         token_expiration_threshold_sec = self.config.get(
-            "auth.token_expiration_threshold_sec", 60
+            "api.auth.token_expiration_threshold_sec", 60
         )
-        req_token_expiration_sec = self.config.get("api.auth.req_token_expiration_sec", None)
+        req_token_expiration_sec = self.config.get(
+            "api.auth.request_token_expiration_sec",
+            self.config.get("api.auth.req_token_expiration_sec", None)
+        )
         self.__auth_token = None
         self._update_default_api_method()
         if ENV_AUTH_TOKEN.get():
@@ -234,8 +238,10 @@ class Session(TokenManager):
             api_version = token_dict.get('api_version')
             if not api_version:
                 api_version = '2.2' if token_dict.get('env', '') == 'prod' else Session.api_version
-            if token_dict.get('server_version'):
-                self.add_client('clearml-server', token_dict.get('server_version'))
+
+            Session.server_version = token_dict.get('server_version')
+            if Session.server_version:
+                self.add_client('clearml-server', Session.server_version)
 
             Session.max_api_version = Session.api_version = str(api_version)
             Session.feature_set = str(token_dict.get('feature_set', self.feature_set) or "basic")
@@ -746,6 +752,13 @@ class Session(TokenManager):
         return urlunparse(parsed)
 
     @classmethod
+    def check_min_server_version(cls, min_server_version):
+        """
+        Return True if Session.server_version is greater or equal >= to min_server_version
+        """
+        return cls._version_tuple(cls.server_version) >= cls._version_tuple(str(min_server_version))
+
+    @classmethod
     def check_min_api_version(cls, min_api_version, raise_error=False):
         """
         Return True if Session.api_version is greater or equal >= to min_api_version
@@ -766,7 +779,7 @@ class Session(TokenManager):
                             pass
                     cls.max_api_version = cls.api_version = cls._offline_default_version
             else:
-                # if the requested version is lower then the minimum we support,
+                # if the requested version is lower than the minimum we support,
                 # no need to actually check what the server has, we assume it must have at least our version.
                 if cls._version_tuple(cls.api_version) >= cls._version_tuple(str(min_api_version)):
                     return True
@@ -804,6 +817,13 @@ class Session(TokenManager):
     @classmethod
     def get_clients(cls):
         return cls._client
+
+    @classmethod
+    def verify_feature_set(cls, feature_set):
+        if isinstance(feature_set, str):
+            feature_set = [feature_set]
+        if cls.feature_set not in feature_set:
+            raise ValueError("ClearML-server does not support requested feature set '{}'".format(feature_set))
 
     @staticmethod
     def _version_tuple(v):
