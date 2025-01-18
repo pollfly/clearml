@@ -21,8 +21,7 @@ long_description = read_text(os.path.join(here, 'README.md'))
 # fix github, dark logo hack.
 long_description = long_description.replace(
     """<img align="center" src="docs/clearml-logo.svg#gh-light-mode-only" alt="Clear|ML"><img align="center" src="docs/clearml-logo-dark.svg#gh-dark-mode-only" alt="Clear|ML">""",  # noqa
-    """<a href="https://app.clear.ml"><img src="https://github.com/clearml/clearml/blob/master/docs/clearml-logo.svg?raw=true" width="250px"></a>""",  # noqa
-    1
+    """<a href="https://clear.ml"><img src="https://raw.githubusercontent.com/clearml/clearml/refs/heads/master/docs/clearml-logo.svg" width="250px"></a>""",  # noqa
 )
 
 
