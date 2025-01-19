@@ -4,7 +4,9 @@ from .fastapi_proxy import FastAPIProxy
 class HttpProxy:
     DEFAULT_PORT = 9000
 
-    def __init__(self, port=None, workers=None, default_target=None, log_level=None, access_log=True):
+    def __init__(
+        self, port=None, workers=None, default_target=None, log_level=None, access_log=True, enable_streaming=True
+    ):
         # at the moment, only a fastapi proxy is supported
         self.base_proxy = FastAPIProxy(
             port or self.DEFAULT_PORT,
@@ -12,6 +14,7 @@ class HttpProxy:
             default_target=default_target,
             log_level=log_level,
             access_log=access_log,
+            enable_streaming=enable_streaming,
         )
         self.base_proxy.start()
         self.port = port

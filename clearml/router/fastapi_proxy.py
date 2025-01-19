@@ -6,6 +6,7 @@ from typing import Optional
 import httpx
 import uvicorn
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import Match
 
@@ -16,7 +17,7 @@ from ..utilities.process.mp import SafeQueue
 class FastAPIProxy:
     ALL_REST_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
 
-    def __init__(self, port, workers=None, default_target=None, log_level=None, access_log=None):
+    def __init__(self, port, workers=None, default_target=None, log_level=None, access_log=None, enable_streaming=True):
         self.app = None
         self.routes = {}
         self.port = port
@@ -25,6 +26,7 @@ class FastAPIProxy:
         self.workers = workers
         self.access_log = access_log
         self.log_level = None
+        self.enable_streaming = enable_streaming
         self._default_target = default_target
         self._default_session = None
         self._in_subprocess = False
@@ -50,18 +52,10 @@ class FastAPIProxy:
                 for route in proxy.app.router.routes:
                     if route.matches(scope)[0] == Match.FULL:
                         return await call_next(request)
-                proxied_response = await proxy._default_session.request(
-                    method=request.method,
-                    url=proxy._default_target + request.url.path,
-                    headers=dict(request.headers),
-                    content=await request.body(),
-                    params=request.query_params,
+                proxied_response = await proxy._send_request(
+                    request, proxy._default_target, proxy._default_target + request.url.path
                 )
-                return Response(
-                    content=proxied_response.content,
-                    headers=dict(proxied_response.headers),
-                    status_code=proxied_response.status_code,
-                )
+                return await proxy._convert_httpx_response_to_fastapi(proxied_response)
 
         self.app.add_middleware(DefaultRouteMiddleware)
 
@@ -77,22 +71,70 @@ class FastAPIProxy:
 
         request = await route_data.on_request(request)
         try:
-            proxied_response = await route_data.session.request(
-                method=request.method,
-                url=f"{route_data.target_url}/{path}" if path else route_data.target_url,
-                headers=dict(request.headers),
-                content=await request.body(),
-                params=request.query_params,
+            proxied_response = await self._send_request(
+                request, route_data.session, url=f"{route_data.target_url}/{path}" if path else route_data.target_url
             )
-            proxied_response = Response(
-                content=proxied_response.content,
-                headers=dict(proxied_response.headers),
-                status_code=proxied_response.status_code,
-            )
+            proxied_response = await self._convert_httpx_response_to_fastapi(proxied_response)
         except Exception as e:
             await route_data.on_error(request, e)
             raise
         return await route_data.on_response(proxied_response, request)
+
+    async def _send_request(self, request, session, url):
+        if not self.enable_streaming:
+            proxied_response = await session.request(
+                method=request.method,
+                url=url,
+                headers=dict(request.headers),
+                content=await request.body(),
+                params=request.query_params
+            )
+        else:
+            request = session.build_request(
+                method=request.method,
+                url=url,
+                content=request.stream(),
+                params=request.query_params,
+                headers=dict(request.headers),
+                timeout=httpx.USE_CLIENT_DEFAULT
+            )
+            proxied_response = await session.send(
+                request=request,
+                auth=httpx.USE_CLIENT_DEFAULT,
+                follow_redirects=httpx.USE_CLIENT_DEFAULT,
+                stream=True,
+            )
+        return proxied_response
+
+    async def _convert_httpx_response_to_fastapi(self, httpx_response):
+        if self.enable_streaming and httpx_response.headers.get("transfer-encoding", "").lower() == "chunked":
+
+            async def upstream_body_generator():
+                async for chunk in httpx_response.aiter_bytes():
+                    yield chunk
+
+            return StreamingResponse(
+                upstream_body_generator(), status_code=httpx_response.status_code, headers=dict(httpx_response.headers)
+            )
+        if not self.enable_streaming:
+            content = httpx_response.content
+        else:
+            content = await httpx_response.aread()
+        fastapi_response = Response(
+            content=content,
+            status_code=httpx_response.status_code,
+            media_type=httpx_response.headers.get("content-type", None),
+            headers=dict(httpx_response.headers),
+        )
+        # should delete content-length when not present in the original response
+        # relevant for:
+        # https://datatracker.ietf.org/doc/html/rfc9112#body.content-length:~:text=MUST%20NOT%20send%20a%20Content%2DLength%20header
+        if httpx_response.headers.get("content-length") is None:
+            try:
+                del fastapi_response.headers["content-length"]  # no pop available
+            except Exception:
+                pass
+        return fastapi_response
 
     def add_route(
         self,

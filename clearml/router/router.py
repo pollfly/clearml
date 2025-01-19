@@ -34,6 +34,7 @@ class HttpRouter:
         )
         router.deploy(wait=True)
     """
+
     _instance = None
 
     def __init__(self, task):
@@ -45,7 +46,9 @@ class HttpRouter:
         self._proxy = None
         self._proxy_params = {"port": HttpProxy.DEFAULT_PORT, "access_log": True}
 
-    def set_local_proxy_parameters(self, incoming_port=None, default_target=None, log_level=None, access_log=True):
+    def set_local_proxy_parameters(
+        self, incoming_port=None, default_target=None, log_level=None, access_log=True, enable_streaming=True
+    ):
         # type: (Optional[int], Optional[str], Optional[str], bool) -> ()
         """
         Set the parameters with which the local proxy is initialized
@@ -56,11 +59,14 @@ class HttpRouter:
         :param log_level: Python log level for the proxy, one of:
             'critical', 'error', 'warning', 'info', 'debug', 'trace'
         :param access_log: Enable/Disable access log
+        :param enable_streaming: If True, enable streaming of responses with the `transfer-encoding` header set.
+            If False, no response will be streamed
         """
         self._proxy_params["port"] = incoming_port or HttpProxy.DEFAULT_PORT
         self._proxy_params["default_target"] = default_target
         self._proxy_params["log_level"] = log_level
         self._proxy_params["access_log"] = access_log
+        self._proxy_params["enable_streaming"] = enable_streaming
 
     def start_local_proxy(self):
         """
@@ -75,7 +81,7 @@ class HttpRouter:
         request_callback=None,  # type: Callable[Request, Dict]
         response_callback=None,  # type: Callable[Response, Request, Dict]
         endpoint_telemetry=True,  # type: Union[bool, Dict]
-        error_callback=None  # type: Callable[Request, Exception, Dict]
+        error_callback=None,  # type: Callable[Request, Exception, Dict]
     ):
         """
         Create a local route from a source to a target through a proxy. If no proxy instance
@@ -135,7 +141,7 @@ class HttpRouter:
             request_callback=request_callback,
             response_callback=response_callback,
             endpoint_telemetry=endpoint_telemetry,
-            error_callback=error_callback
+            error_callback=error_callback,
         )
 
     def remove_local_route(self, source):
@@ -148,9 +154,7 @@ class HttpRouter:
         if self._proxy:
             self._proxy.remove_route(source)
 
-    def deploy(
-        self, wait=False, wait_interval_seconds=3.0, wait_timeout_seconds=90.0
-    ):
+    def deploy(self, wait=False, wait_interval_seconds=3.0, wait_timeout_seconds=90.0):
         # type: (Optional[int], str, bool, float, float) -> Optional[Dict]
         """
         Start the local HTTP proxy and request an external endpoint for an application
