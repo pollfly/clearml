@@ -113,6 +113,7 @@ if TYPE_CHECKING:
     import pandas
     import numpy
     from PIL import Image
+    from .router.router import HttpRouter
 
 # Forward declaration to help linters
 TaskInstance = TypeVar("TaskInstance", bound="Task")
@@ -185,6 +186,11 @@ class Task(_Task):
     _launch_multi_node_section = "launch_multi_node"
     _launch_multi_node_instance_tag = "multi_node_instance"
 
+    _external_endpoint_port_map = {"http": "_PORT", "tcp": "external_tcp_port"}
+    _external_endpoint_address_map = {"http": "_ADDRESS", "tcp": "external_address"}
+    _external_endpoint_service_map = {"http": "EXTERNAL", "tcp": "EXTERNAL_TCP"}
+    _external_endpoint_internal_port_map = {"http": "_PORT", "tcp": "upstream_task_port"}
+
     class _ConnectedParametersType(object):
         argparse = "argument_parser"
         dictionary = "dictionary"
@@ -218,6 +224,8 @@ class Task(_Task):
         self._resource_monitor = None
         self._calling_filename = None
         self._remote_functions_generated = {}
+        self._external_endpoint_ports = {}
+        self._http_router = None
         # register atexit, so that we mark the task as stopped
         self._at_exit_called = False
 
@@ -842,6 +850,49 @@ class Task(_Task):
         task._set_startup_info()
         return task
 
+    def get_http_router(self):
+        # type: () -> HttpRouter
+        """
+        Retrieve an instance of `HttpRouter` to manage an external HTTP endpoint and intercept traffic.
+        The `HttpRouter` serves as a traffic manager, enabling the creation and configuration of local and external
+        routesto redirect, monitor, or manipulate HTTP requests and responses. It is designed to handle routing
+        needs such via a proxy setup which handles request/response interception and telemetry reporting for
+        applications that require HTTP endpoint management.
+
+        Example usage:
+
+        .. code-block:: py
+            def request_callback(request, persistent_state):
+                persistent_state["last_request_time"] = time.time()
+
+            def response_callback(response, request, persistent_state):
+                print("Latency:", time.time() - persistent_state["last_request_time"])
+                if urllib.parse.urlparse(str(request.url).rstrip("/")).path == "/modify":
+                    new_content = response.body.replace(b"modify", b"modified")
+                    headers = copy.deepcopy(response.headers)
+                    headers["Content-Length"] = str(len(new_content))
+                    return Response(status_code=response.status_code, headers=headers, content=new_content)
+
+            router = Task.current_task().get_http_router()
+            router.set_local_proxy_parameters(incoming_port=9000)
+            router.create_local_route(
+                source="/",
+                target="http://localhost:8000",
+                request_callback=request_callback,
+                response_callback=response_callback,
+                endpoint_telemetry={"model": "MyModel"}
+            )
+            router.deploy(wait=True)
+        """
+        try:
+            from .router.router import HttpRouter  # noqa
+        except ImportError:
+            raise UsageError("Could not import `HttpRouter`. Please run `pip install clearml[router]`")
+
+        if self._http_router is None:
+            self._http_router = HttpRouter(self)
+        return self._http_router
+
     def request_external_endpoint(
         self, port, protocol="http", wait=False, wait_interval_seconds=3.0, wait_timeout_seconds=90.0
     ):
@@ -850,14 +901,14 @@ class Task(_Task):
         Request an external endpoint for an application
 
         :param port: Port the application is listening to
-        :param protocol: As of now, only `http` is supported
+        :param protocol: `http` or `tcp`
         :param wait: If True, wait for the endpoint to be assigned
         :param wait_interval_seconds: The poll frequency when waiting for the endpoint
         :param wait_timeout_seconds: If this timeout is exceeded while waiting for the endpoint,
             the method will no longer wait and None will be returned
 
         :return: If wait is False, this method will return None.
-            If no endpoint could be found while waiting, this mehtod returns None.
+            If no endpoint could be found while waiting, this method returns None.
             Otherwise, it returns a dictionary containing the following values:
             - endpoint - raw endpoint. One might need to authenticate in order to use this endpoint
             - browser_endpoint - endpoint to be used in browser. Authentication will be handled via the browser
@@ -865,74 +916,150 @@ class Task(_Task):
             - protocol - the protocol used by the endpoint
         """
         Session.verify_feature_set("advanced")
-        if not getattr(self, "_external_endpoint_port", None):
+        if protocol not in self._external_endpoint_port_map.keys():
+            raise ValueError("Invalid protocol: {}".format(protocol))
+
+        # sync with router - get data from Task
+        if not self._external_endpoint_ports.get(protocol):
             self.reload()
-            assigned_port = self._get_runtime_properties().get("_PORT")
-            if assigned_port:
-                self._external_endpoint_port = assigned_port
-        if getattr(self, "_external_endpoint_port", None):
-            if self._external_endpoint_port != port:  # noqa
-                raise ValueError(
-                    "Only one endpoint can be requested at the moment. Port already exposed is: {}".format(
-                        self._external_endpoint_port
-                    )
+            internal_port = self._get_runtime_properties().get(self._external_endpoint_internal_port_map[protocol])
+            if internal_port:
+                self._external_endpoint_ports[protocol] = internal_port
+
+        # check if we are trying to change the port - currently not allowed
+        if self._external_endpoint_ports.get(protocol):
+            if self._external_endpoint_ports.get(protocol) == port:
+                # we already set this endpoint, so do nothing
+                return
+
+            raise ValueError(
+                "Only one endpoint per protocol can be requested at the moment. Port already exposed is: {}".format(
+                    self._external_endpoint_ports.get(protocol)
                 )
-            return
+            )
+
+        # mark for the router our request
         # noinspection PyProtectedMember
         self._set_runtime_properties(
-            {"_SERVICE": "EXTERNAL", "_ADDRESS": get_private_ip(), "_PORT": port}
+            {
+                "_SERVICE": self._external_endpoint_service_map[protocol],
+                self._external_endpoint_address_map[protocol]: get_private_ip(),
+                self._external_endpoint_port_map[protocol]: port,
+            }
         )
+        # required system_tag for the router to catch the routing request
         self.set_system_tags((self.get_system_tags() or []) + ["external_service"])
-        self._external_endpoint_port = port
+        self._external_endpoint_ports[protocol] = port
         if wait:
-            return self.wait_for_external_endpoint(wait_interval_seconds=wait_interval_seconds)
+            return self.wait_for_external_endpoint(
+                wait_interval_seconds=wait_interval_seconds,
+                wait_timeout_seconds=wait_timeout_seconds,
+                protocol=protocol
+            )
         return None
 
-    def wait_for_external_endpoint(self, wait_interval_seconds=3.0, wait_timeout_seconds=90.0):
-        # type: (float) -> Optional[Dict]
+    def wait_for_external_endpoint(self, wait_interval_seconds=3.0, wait_timeout_seconds=90.0, protocol="http"):
+        # type: (float, float, Optional[str]) -> Union[Optional[Dict], List[Optional[Dict]]]
         """
         Wait for an external endpoint to be assigned
 
         :param wait_interval_seconds: The poll frequency when waiting for the endpoint
         :param wait_timeout_seconds: If this timeout is exceeded while waiting for the endpoint,
             the method will no longer wait
+        :param protocol: `http` or `tcp`. Wait for an endpoint to be assigned based on the protocol.
+            If None, wait for all supported protocols
 
-        :return: If no endpoint could be found while waiting, this mehtod returns None.
-            Otherwise, it returns a dictionary containing the following values:
+        :return: If no endpoint could be found while waiting, this method returns None.
+            If a protocol has been specified, it returns a dictionary containing the following values:
             - endpoint - raw endpoint. One might need to authenticate in order to use this endpoint
             - browser_endpoint - endpoint to be used in browser. Authentication will be handled via the browser
             - port - the port exposed by the application
             - protocol - the protocol used by the endpoint
+            If not protocol is specified, it returns a list of dictionaries containing the values above,
+            for each protocol requested and waited
         """
         Session.verify_feature_set("advanced")
-        if not getattr(self, "_external_endpoint_port", None):
-            LoggerRoot.get_base_logger().warning("No external endpoints have been requested")
+        if protocol:
+            return self._wait_for_external_endpoint(
+                wait_interval_seconds=wait_interval_seconds,
+                wait_timeout_seconds=wait_timeout_seconds,
+                protocol=protocol,
+                warn=True
+            )
+        results = []
+        protocols = ["http", "tcp"]
+        waited_protocols = []
+        for protocol_ in protocols:
+            start_time = time.time()
+            result = self._wait_for_external_endpoint(
+                wait_interval_seconds=wait_interval_seconds,
+                wait_timeout_seconds=wait_timeout_seconds,
+                protocol=protocol_,
+                warn=False,
+            )
+            elapsed = time.time() - start_time
+            if result:
+                results.append(result)
+            wait_timeout_seconds -= elapsed
+            if wait_timeout_seconds > 0 or result:
+                waited_protocols.append(protocol_)
+        unwaited_protocols = [p for p in protocols if p not in waited_protocols]
+        if wait_timeout_seconds <= 0 and unwaited_protocols:
+            LoggerRoot.get_base_logger().warning(
+                "Timeout exceeded while waiting for {} endpoint(s)".format(",".join(unwaited_protocols))
+            )
+        return results
+
+    def _wait_for_external_endpoint(
+        self, wait_interval_seconds=3.0, wait_timeout_seconds=90.0, protocol="http", warn=True
+    ):
+        if not self._external_endpoint_ports.get(protocol):
+            self.reload()
+            internal_port = self._get_runtime_properties().get(self._external_endpoint_internal_port_map[protocol])
+            if internal_port:
+                self._external_endpoint_ports[protocol] = internal_port
+        if not self._external_endpoint_ports.get(protocol):
+            if warn:
+                LoggerRoot.get_base_logger().warning("No external {} endpoints have been requested".format(protocol))
             return None
         start_time = time.time()
         while True:
             self.reload()
-            # noinspection PyProtectedMember
             runtime_props = self._get_runtime_properties()
-            endpoint = runtime_props.get("endpoint")
-            browser_endpoint = runtime_props.get("browser_endpoint")
-            if not getattr(self, "_external_endpoint_port", None):
-                self._external_endpoint_port = runtime_props.get("_PORT")
+            endpoint, browser_endpoint = None, None
+            if protocol == "http":
+                endpoint = runtime_props.get("endpoint")
+                browser_endpoint = runtime_props.get("browser_endpoint")
+            elif protocol == "tcp":
+                health_check = runtime_props.get("upstream_task_port")
+                if health_check:
+                    endpoint = (
+                        runtime_props.get(self._external_endpoint_address_map[protocol])
+                        + ":"
+                        + str(runtime_props.get(self._external_endpoint_port_map[protocol]))
+                    )
             if endpoint or browser_endpoint:
                 return {
                     "endpoint": endpoint,
                     "browser_endpoint": browser_endpoint,
-                    "port": self._external_endpoint_port,
-                    "protocol": "http",
+                    "port": self._external_endpoint_ports[protocol],
+                    "protocol": protocol,
                 }
             if time.time() >= start_time + wait_timeout_seconds:
-                LoggerRoot.get_base_logger().warning("Timeout exceeded while waiting for endpoint")
+                if warn:
+                    LoggerRoot.get_base_logger().warning(
+                        "Timeout exceeded while waiting for {} endpoint".format(protocol)
+                    )
                 return None
             time.sleep(wait_interval_seconds)
 
-    def list_external_endpoints(self):
-        # type: () -> List[Dict]
+    def list_external_endpoints(self, protocol=None):
+        # type: (Optional[str]) -> List[Dict]
         """
         List all external endpoints assigned
+
+        :param protocol: If None, list all external endpoints. Otherwise, only list endpoints
+            that use this protocol
 
         :return: A list of dictionaries. Each dictionary contains the following values:
             - endpoint - raw endpoint. One might need to authenticate in order to use this endpoint
@@ -941,23 +1068,37 @@ class Task(_Task):
             - protocol - the protocol used by the endpoint
         """
         Session.verify_feature_set("advanced")
-        if not getattr(self, "_external_endpoint_port", None):
-            self.reload()
-            self._external_endpoint_port = self._get_runtime_properties().get("_PORT")
-        if not getattr(self, "_external_endpoint_port", None):
-            LoggerRoot.get_base_logger().warning("No external endpoints have been requested")
-            return []
         runtime_props = self._get_runtime_properties()
-        endpoint = runtime_props.get("endpoint")
-        browser_endpoint = runtime_props.get("browser_endpoint")
-        return [
-            {
-                "endpoint": endpoint,
-                "browser_endpoint": browser_endpoint,
-                "port": self._external_endpoint_port,
-                "protocol": "http",
-            }
-        ]
+        results = []
+        protocols = [protocol] if protocol is not None else ["http", "tcp"]
+        for protocol in protocols:
+            internal_port = runtime_props.get(self._external_endpoint_internal_port_map[protocol])
+            if internal_port:
+                self._external_endpoint_ports[protocol] = internal_port
+            else:
+                continue
+            endpoint, browser_endpoint = None, None
+            if protocol == "http":
+                endpoint = runtime_props.get("endpoint")
+                browser_endpoint = runtime_props.get("browser_endpoint")
+            elif protocol == "tcp":
+                health_check = runtime_props.get("upstream_task_port")
+                if health_check:
+                    endpoint = (
+                        runtime_props.get(self._external_endpoint_address_map[protocol])
+                        + ":"
+                        + str(runtime_props.get(self._external_endpoint_port_map[protocol]))
+                    )
+            if endpoint or browser_endpoint:
+                results.append(
+                    {
+                        "endpoint": endpoint,
+                        "browser_endpoint": browser_endpoint,
+                        "port": internal_port,
+                        "protocol": protocol,
+                    }
+                )
+        return results
 
     @classmethod
     def create(
@@ -2267,6 +2408,26 @@ class Task(_Task):
         # mark task as stopped
         self.stopped(force=force, status_message=str(status_message) if status_message else None)
 
+    def mark_stop_request(self, force=False, status_message=None):
+        # type: (bool, Optional[str]) -> ()
+        """
+        Request a task to stop. this will not change the task status
+        but mark a request for an agent or SDK to actually stop the Task.
+        This will trigger the Task's abort callback, and at the end will
+        change the task status to stopped and kill the Task's processes
+
+        Notice: calling this on your own Task, will cause
+        the watchdog to call the on_abort callback and kill the process
+
+        :param bool force: If not True, call fails if the task status is not 'in_progress'
+        :param str status_message: Optional, add status change message to the stop request.
+            This message will be stored as status_message on the Task's info panel
+        """
+        # flush any outstanding logs
+        self.flush(wait_for_uploads=True)
+        # request task stop
+        return self.stop_request(self, force=force, status_message=status_message)
+
     def flush(self, wait_for_uploads=False):
         # type: (bool) -> bool
         """
@@ -2523,7 +2684,7 @@ class Task(_Task):
           - PIL.Image - whatever extensions PIL supports (default ``.png``)
           - In case the ``serialization_function`` argument is set - any extension is supported
 
-        :param Callable[Any, Union[bytes, bytearray]] serialization_function: A serialization function that takes one
+        :param serialization_function: A serialization function that takes one
             parameter of any type which is the object to be serialized. The function should return
             a `bytes` or `bytearray` object, which represents the serialized object. Note that the object will be
             immediately serialized using this function, thus other serialization methods will not be used
