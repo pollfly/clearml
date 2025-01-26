@@ -31,7 +31,7 @@ def create_2d_histogram_plot(np_row_wise, labels, title=None, xtitle=None, ytitl
 
     np_row_wise = np.atleast_2d(np_row_wise)
     assert len(np_row_wise.shape) == 2, "Expected a 2D numpy array"
-    use_series = bool(labels)
+    use_series = bool(labels) and bool(series)
 
     # using labels without xlabels leads to original behavior
     if labels is not None and xlabels is None:
@@ -41,10 +41,10 @@ def create_2d_histogram_plot(np_row_wise, labels, title=None, xtitle=None, ytitl
         labels = [fake_label] * np_row_wise.shape[0]
     elif labels:
         if len(labels) == 1:
-            labels = [labels] * np_row_wise.shape[0]
+            labels = labels * np_row_wise.shape[0]
         assert len(xlabels) == np_row_wise.shape[1]
     elif not labels and xlabels:
-        labels = [series]
+        labels = [series or '']
 
     data = [_np_row_to_plotly_data_item(
         np_row=np_row_wise[i, :], label=labels[i] if labels else None, xlabels=xlabels, data_args=data_args
