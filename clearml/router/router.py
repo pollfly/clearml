@@ -1,4 +1,4 @@
-from typing import Optional, Callable, Dict, Union  # noqa
+from typing import Optional, Callable, Dict, Union, List  # noqa
 from fastapi import Request, Response  # noqa
 from .proxy import HttpProxy
 

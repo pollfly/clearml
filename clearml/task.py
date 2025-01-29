@@ -113,7 +113,7 @@ if TYPE_CHECKING:
     import pandas
     import numpy
     from PIL import Image
-    from .router.router import HttpRouter
+    from .router.router import HttpRouter  # noqa: F401
 
 # Forward declaration to help linters
 TaskInstance = TypeVar("TaskInstance", bound="Task")
