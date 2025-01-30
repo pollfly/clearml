@@ -79,7 +79,7 @@ from .binding.gradio_bind import PatchGradio
 from .binding.frameworks import WeightsFileHandler
 from .config import (
     config, DEV_TASK_NO_REUSE, get_is_master_node, DEBUG_SIMULATE_REMOTE_TASK, DEV_DEFAULT_OUTPUT_URI,
-    deferred_config, TASK_SET_ITERATION_OFFSET)
+    deferred_config, TASK_SET_ITERATION_OFFSET, HOST_MACHINE_IP)
 from .config import running_remotely, get_remote_task_id
 from .config.cache import SessionCache
 from .debugging.log import LoggerRoot
@@ -113,7 +113,7 @@ if TYPE_CHECKING:
     import pandas
     import numpy
     from PIL import Image
-    from .router.router import HttpRouter
+    from .router.router import HttpRouter  # noqa: F401
 
 # Forward declaration to help linters
 TaskInstance = TypeVar("TaskInstance", bound="Task")
@@ -190,6 +190,7 @@ class Task(_Task):
     _external_endpoint_address_map = {"http": "_ADDRESS", "tcp": "external_address"}
     _external_endpoint_service_map = {"http": "EXTERNAL", "tcp": "EXTERNAL_TCP"}
     _external_endpoint_internal_port_map = {"http": "_PORT", "tcp": "upstream_task_port"}
+    _external_endpoint_host_tcp_port_mapping = {"tcp_host_mapping": "_external_host_tcp_port_mapping"}
 
     class _ConnectedParametersType(object):
         argparse = "argument_parser"
@@ -926,29 +927,67 @@ class Task(_Task):
             if internal_port:
                 self._external_endpoint_ports[protocol] = internal_port
 
+            # notice this applies for both raw tcp and http, it is so that we can
+            # detect the host machine exposed ports, and register them on the router
+            external_host_port_mapping = self._get_runtime_properties().get(
+                self._external_endpoint_host_tcp_port_mapping["tcp_host_mapping"])
+            self._external_endpoint_ports["tcp_host_mapping"] = external_host_port_mapping
+
+        # check if we need to parse the port mapping, only if running on "bare-metal" host machine.
+        if self._external_endpoint_ports.get("tcp_host_mapping"):
+            external_host_port_mapping = self._external_endpoint_ports.get("tcp_host_mapping")
+            # format is docker standard port mapping format:
+            # example: "out:in,out_range100-out_range102:in_range0-in_range2"
+            # notice `out` in this context means the host port, the one that
+            # the router will route external traffic to
+            # noinspection PyBroadException
+            out_port = None
+            # noinspection PyBroadException
+            try:
+                for port_range in external_host_port_mapping.split(","):
+                    out_range, in_range = port_range.split(":", 1)
+                    out_range = out_range.split("-")
+                    in_range = in_range.split("-")
+                    if int(in_range[0]) <= port <= int(in_range[-1]):
+                        # we found a match:
+                        out_port = int(out_range[0]) + (port-int(in_range[0]))
+                        print("INFO: Task.request_external_endpoint(...) changed requested external port to {}, "
+                              "conforming to mapped external host ports [{} -> {}]".format(out_port, port, port_range))
+                        break
+
+                if not out_port:
+                    raise ValueError("match not found defaulting to original port")
+            except Exception:
+                print("WARNING: Task.request_external_endpoint(...) failed matching requested port to "
+                      "mapped external host port [{} to {}], "
+                      "proceeding with original port {}".format(port, external_host_port_mapping, port))
+
+            # change the requested port to the one we have on the machine
+            if out_port:
+                port = out_port
+
         # check if we are trying to change the port - currently not allowed
         if self._external_endpoint_ports.get(protocol):
             if self._external_endpoint_ports.get(protocol) == port:
-                # we already set this endpoint, so do nothing
-                return
-
-            raise ValueError(
-                "Only one endpoint per protocol can be requested at the moment. Port already exposed is: {}".format(
-                    self._external_endpoint_ports.get(protocol)
+                # we already set this endpoint, but we will set the values again, because maybe IP changed?!
+                pass
+            else:
+                raise ValueError(
+                    "Only one endpoint per protocol can be requested at the moment. "
+                    "Port already exposed is: {}".format(self._external_endpoint_ports.get(protocol))
                 )
-            )
 
         # mark for the router our request
         # noinspection PyProtectedMember
         self._set_runtime_properties(
             {
                 "_SERVICE": self._external_endpoint_service_map[protocol],
-                self._external_endpoint_address_map[protocol]: get_private_ip(),
+                self._external_endpoint_address_map[protocol]: HOST_MACHINE_IP.get() or get_private_ip(),
                 self._external_endpoint_port_map[protocol]: port,
             }
         )
         # required system_tag for the router to catch the routing request
-        self.set_system_tags((self.get_system_tags() or []) + ["external_service"])
+        self.set_system_tags(list(set((self.get_system_tags() or []) + ["external_service"])))
         self._external_endpoint_ports[protocol] = port
         if wait:
             return self.wait_for_external_endpoint(
@@ -1062,10 +1101,11 @@ class Task(_Task):
             that use this protocol
 
         :return: A list of dictionaries. Each dictionary contains the following values:
-            - endpoint - raw endpoint. One might need to authenticate in order to use this endpoint
-            - browser_endpoint - endpoint to be used in browser. Authentication will be handled via the browser
-            - port - the port exposed by the application
-            - protocol - the protocol used by the endpoint
+
+          - endpoint - raw endpoint. One might need to authenticate in order to use this endpoint
+          - browser_endpoint - endpoint to be used in browser. Authentication will be handled via the browser
+          - port - the port exposed by the application
+          - protocol - the protocol used by the endpoint
         """
         Session.verify_feature_set("advanced")
         runtime_props = self._get_runtime_properties()
@@ -1308,7 +1348,7 @@ class Task(_Task):
     ):
         # type: (...) -> List[TaskInstance]
         """
-        Get a list of Tasks objects matching the queries/filters
+        Get a list of Tasks objects matching the queries/filters:
 
         - A list of specific Task IDs.
         - Filter Tasks based on specific fields:
@@ -1844,7 +1884,7 @@ class Task(_Task):
             While by setting `name='Train'` the connected dictionary will be under the Train section in the hyperparameters section.
 
         :param ignore_remote_overrides: If True, ignore UI/backend overrides when running remotely.
-        Default is False, meaning that any changes made in the UI/backend will be applied in remote execution.
+            Default is False, meaning that any changes made in the UI/backend will be applied in remote execution.
 
         :return: It will return the same object that was passed as the `mutable` argument to the method, except if the type of the object is dict.
                  For dicts the :meth:`Task.connect` will return the dict decorated as a `ProxyDictPostWrite`.
@@ -1996,7 +2036,7 @@ class Task(_Task):
         :param str description: Configuration section description (text). default: None
 
         :param bool ignore_remote_overrides: If True, ignore UI/backend overrides when running remotely.
-        Default is False, meaning that any changes made in the UI/backend will be applied in remote execution.
+            Default is False, meaning that any changes made in the UI/backend will be applied in remote execution.
 
         :return: If a dictionary is specified, then a dictionary is returned. If pathlib2.Path / string is
             specified, then a path to a local configuration file is returned. Configuration object.
