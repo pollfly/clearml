@@ -33,7 +33,7 @@ from six import binary_type, StringIO
 from six.moves.queue import Queue, Empty
 from six.moves.urllib.parse import urlparse
 
-from clearml.utilities.requests_toolbelt import MultipartEncoder
+from clearml.utilities.requests_toolbelt import MultipartEncoderMonitor, MultipartEncoder
 from .callbacks import UploadProgressReport, DownloadProgressReport
 from .util import quote_url
 from ..backend_api.session import Session
@@ -55,6 +55,7 @@ class DownloadError(Exception):
 
 @six.add_metaclass(ABCMeta)
 class _Driver(object):
+    _certs_cache_context = "certs"
     _file_server_hosts = None
 
     @classmethod
@@ -115,6 +116,28 @@ class _Driver(object):
                     hosts.append(substituted)
             cls._file_server_hosts = hosts
         return cls._file_server_hosts
+
+    @classmethod
+    def download_cert(cls, cert_url):
+        # import here to avoid circular imports
+        from .manager import StorageManager
+
+        cls.get_logger().info("Attempting to download remote certificate '{}'".format(cert_url))
+        potential_exception = None
+        downloaded_verify = None
+        try:
+            downloaded_verify = StorageManager.get_local_copy(cert_url, cache_context=cls._certs_cache_context)
+        except Exception as e:
+            potential_exception = e
+        if not downloaded_verify:
+            cls.get_logger().error(
+                "Failed downloading remote certificate '{}'{}".format(
+                    cert_url, "Error is: {}".format(potential_exception) if potential_exception else ""
+                )
+            )
+        else:
+            cls.get_logger().info("Successfully downloaded remote certificate '{}'".format(cert_url))
+        return downloaded_verify
 
 
 class _HttpDriver(_Driver):
@@ -180,6 +203,14 @@ class _HttpDriver(_Driver):
         return self._containers[container_name]
 
     def upload_object_via_stream(self, iterator, container, object_name, extra=None, callback=None, **kwargs):
+        def monitor_callback(monitor):
+            new_chunk = monitor.bytes_read - monitor.previous_read
+            monitor.previous_read = monitor.bytes_read
+            try:
+                callback(new_chunk)
+            except Exception as ex:
+                self.get_logger().debug('Exception raised when running callback function: {}'.format(ex))
+
         # when sending data in post, there is no connection timeout, just an entire upload timeout
         timeout = int(self.timeout_total)
         url = container.name
@@ -188,21 +219,23 @@ class _HttpDriver(_Driver):
             host, _, path = object_name.partition('/')
             url += host + '/'
 
-        m = MultipartEncoder(fields={
-            path: (path, iterator, get_file_mimetype(object_name))
-        })
-
-        headers = {
-            'Content-Type': m.content_type,
-        }
-        headers.update(container.get_headers(url) or {})
-
+        stream_size = None
         if hasattr(iterator, 'tell') and hasattr(iterator, 'seek'):
             pos = iterator.tell()
             iterator.seek(0, 2)
             stream_size = iterator.tell() - pos
             iterator.seek(pos, 0)
             timeout = max(timeout, (stream_size / 1024) / float(self.min_kbps_speed))
+
+        m = MultipartEncoder(fields={path: (path, iterator, get_file_mimetype(object_name))})
+        if callback and stream_size:
+            m = MultipartEncoderMonitor(m, callback=monitor_callback)
+            m.previous_read = 0
+
+        headers = {
+            'Content-Type': m.content_type,
+        }
+        headers.update(container.get_headers(url) or {})
 
         res = container.session.post(
             url, data=m, timeout=timeout, headers=headers
@@ -211,12 +244,6 @@ class _HttpDriver(_Driver):
             raise ValueError('Failed uploading object %s (%d): %s' % (object_name, res.status_code, res.text))
 
         # call back is useless because we are not calling it while uploading...
-
-        # if callback and stream_size:
-        #     try:
-        #         callback(stream_size)
-        #     except Exception as ex:
-        #         log.debug('Exception raised when running callback function: %s' % ex)
         return res
 
     def list_container_objects(self, *args, **kwargs):
@@ -227,8 +254,10 @@ class _HttpDriver(_Driver):
         container = self._containers[obj.container_name]
         res = container.session.delete(obj.url, headers=container.get_headers(obj.url))
         if res.status_code != requests.codes.ok:
-            self.get_logger().warning('Failed deleting object %s (%d): %s' % (
-                obj.object_name, res.status_code, res.text))
+            if not kwargs.get("silent", False):
+                self.get_logger().warning(
+                    'Failed deleting object %s (%d): %s' % (obj.object_name, res.status_code, res.text)
+                )
             return False
         return True
 
@@ -443,6 +472,8 @@ class _Boto3Driver(_Driver):
                 # True is a non-documented value for boto3, use None instead (which means verify)
                 print("Using boto3 verify=None instead of true")
                 verify = None
+            elif isinstance(verify, str) and not os.path.exists(verify) and verify.split("://")[0] in driver_schemes:
+                verify = _Boto3Driver.download_cert(verify)
 
             # boto3 client creation isn't thread-safe (client itself is)
             with self._creation_lock:
@@ -879,7 +910,8 @@ class _GoogleCloudStorageDriver(_Driver):
             except ImportError:
                 pass
             name = getattr(object, "name", "")
-            self.get_logger().warning("Failed deleting object {}: {}".format(name, ex))
+            if not kwargs.get("silent", False):
+                self.get_logger().warning("Failed deleting object {}: {}".format(name, ex))
             return False
 
         return not object.exists()
@@ -2768,9 +2800,9 @@ class StorageHelper(object):
         except Exception as e:
             self._log.error("Could not download file : %s, err:%s " % (remote_path, str(e)))
 
-    def delete(self, path):
+    def delete(self, path, silent=False):
         path = self._canonize_url(path)
-        return self._driver.delete_object(self.get_object(path))
+        return self._driver.delete_object(self.get_object(path), silent=silent)
 
     def check_write_permissions(self, dest_path=None):
         # create a temporary file, then delete it
@@ -2815,7 +2847,7 @@ class StorageHelper(object):
         :param str path: file path to check access to
         :return: Return the string representation of the file as path if have access to it, else None
         """
-
+        path = self._canonize_url(path)
         return self._driver.get_direct_access(path)
 
     @classmethod

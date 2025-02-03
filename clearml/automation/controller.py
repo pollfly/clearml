@@ -59,6 +59,7 @@ class PipelineController(object):
     _update_execution_plot_interval = 5.*60
     _update_progress_interval = 10.
     _monitor_node_interval = 5.*60
+    _pipeline_as_sub_project_cached = None
     _report_plot_execution_flow = dict(title='Pipeline', series='Execution Flow')
     _report_plot_execution_details = dict(title='Pipeline Details', series='Execution Details')
     _evaluated_return_values = {}  # TID: pipeline_name
@@ -212,7 +213,7 @@ class PipelineController(object):
             docker=None,  # type: Optional[str]
             docker_args=None,  # type: Optional[str]
             docker_bash_setup_script=None,  # type: Optional[str]
-            packages=None,  # type: Optional[Union[str, Sequence[str]]]
+            packages=None,  # type: Optional[Union[bool, str, Sequence[str]]]
             repo=None,  # type: Optional[str]
             repo_branch=None,  # type: Optional[str]
             repo_commit=None,  # type: Optional[str]
@@ -221,7 +222,8 @@ class PipelineController(object):
             artifact_deserialization_function=None,  # type: Optional[Callable[[bytes], Any]]
             output_uri=None,  # type: Optional[Union[str, bool]]
             skip_global_imports=False,  # type: bool
-            working_dir=None  # type: Optional[str]
+            working_dir=None,  # type: Optional[str]
+            enable_local_imports=True  # type: bool
     ):
         # type: (...) -> None
         """
@@ -273,6 +275,7 @@ class PipelineController(object):
         :param packages: Manually specify a list of required packages or a local requirements.txt file.
             Example: ["tqdm>=2.1", "scikit-learn"] or "./requirements.txt"
             If not provided, packages are automatically added.
+            Use `False` to install requirements from "requirements.txt" inside your git repository
         :param repo: Optional, specify a repository to attach to the pipeline controller, when remotely executing.
             Allow users to execute the controller inside the specified repository, enabling them to load modules/script
             from the repository. Notice the execution work directory will be the repository root folder.
@@ -315,6 +318,11 @@ class PipelineController(object):
             the steps from a functions, otherwise all global imports will be automatically imported in a safe manner at
              the beginning of each step’s execution. Default is False
         :param working_dir: Working directory to launch the pipeline from.
+        :param enable_local_imports: If True, allow pipeline steps to import from local files
+            by appending to the PYTHONPATH of each step the directory the pipeline controller
+            script resides in (sys.path[0]).
+            If False, the directory won't be appended to PYTHONPATH. Default is True.
+            Ignored while running remotely.
         """
         if auto_version_bump is not None:
             warnings.warn("PipelineController.auto_version_bump is deprecated. It will be ignored", DeprecationWarning)
@@ -327,7 +335,7 @@ class PipelineController(object):
         self._version = str(version).strip() if version else None
         if self._version and not Version.is_valid_version_string(self._version):
             raise ValueError(
-                "Setting non-semantic dataset version '{}'".format(self._version)
+                "Setting non-semantic pipeline version '{}'".format(self._version)
             )
         self._pool_frequency = pool_frequency * 60.
         self._thread = None
@@ -347,19 +355,13 @@ class PipelineController(object):
         self._reporting_lock = RLock()
         self._pipeline_task_status_failed = None
         self._mock_execution = False  # used for nested pipelines (eager execution)
-        self._pipeline_as_sub_project = bool(Session.check_min_api_server_version("2.17"))
         self._last_progress_update_time = 0
         self._artifact_serialization_function = artifact_serialization_function
         self._artifact_deserialization_function = artifact_deserialization_function
         self._skip_global_imports = skip_global_imports
+        self._enable_local_imports = enable_local_imports
         if not self._task:
-            task_name = name or project or '{}'.format(datetime.now())
-            if self._pipeline_as_sub_project:
-                parent_project = (project + "/" if project else "") + self._project_section
-                project_name = "{}/{}".format(parent_project, task_name)
-            else:
-                parent_project = None
-                project_name = project or 'Pipelines'
+            pipeline_project_args = self._create_pipeline_project_args(name, project)
 
             # if user disabled the auto-repo, we force local script storage (repo="" or repo=False)
             set_force_local_repo = False
@@ -368,8 +370,8 @@ class PipelineController(object):
                 set_force_local_repo = True
 
             self._task = Task.init(
-                project_name=project_name,
-                task_name=task_name,
+                project_name=pipeline_project_args["project_name"],
+                task_name=pipeline_project_args["task_name"],
                 task_type=Task.TaskTypes.controller,
                 auto_resource_monitoring=False,
                 reuse_last_task_id=False
@@ -381,15 +383,13 @@ class PipelineController(object):
                 self._task._wait_for_repo_detection(timeout=300.)
                 Task.force_store_standalone_script(force=False)
 
-            # make sure project is hidden
-            if self._pipeline_as_sub_project:
-                get_or_create_project(
-                    self._task.session, project_name=parent_project, system_tags=["hidden"])
-                get_or_create_project(
-                    self._task.session, project_name=project_name,
-                    project_id=self._task.project, system_tags=self._project_system_tags)
-
+            self._create_pipeline_projects(
+                task=self._task,
+                parent_project=pipeline_project_args["parent_project"],
+                project_name=pipeline_project_args["project_name"],
+            )
             self._task.set_system_tags((self._task.get_system_tags() or []) + [self._tag])
+
         if output_uri is not None:
             self._task.output_uri = output_uri
         self._output_uri = output_uri
@@ -400,7 +400,7 @@ class PipelineController(object):
         self._task.set_script(repository=repo, branch=repo_branch, commit=repo_commit, working_dir=working_dir)
         self._auto_connect_task = bool(self._task)
         # make sure we add to the main Task the pipeline tag
-        if self._task and not self._pipeline_as_sub_project:
+        if self._task and not self._pipeline_as_sub_project():
             self._task.add_tags([self._tag])
 
         self._monitored_nodes = {}  # type: Dict[str, dict]
@@ -410,9 +410,9 @@ class PipelineController(object):
             else self._default_retry_on_failure_callback
 
         # add direct link to the pipeline page
-        if self._pipeline_as_sub_project and self._task:
+        if self._pipeline_as_sub_project() and self._task:
             if add_run_number and self._task.running_locally():
-                self._add_pipeline_name_run_number()
+                self._add_pipeline_name_run_number(self._task)
             # noinspection PyProtectedMember
             self._task.get_logger().report_text('ClearML pipeline page: {}'.format(
                 '{}/pipelines/{}/experiments/{}'.format(
@@ -421,6 +421,12 @@ class PipelineController(object):
                     self._task.id,
                 ))
             )
+
+    @classmethod
+    def _pipeline_as_sub_project(cls):
+        if cls._pipeline_as_sub_project_cached is None:
+            cls._pipeline_as_sub_project_cached = bool(Session.check_min_api_server_version("2.17"))
+        return cls._pipeline_as_sub_project_cached
 
     def set_default_execution_queue(self, default_execution_queue):
         # type: (Optional[str]) -> None
@@ -480,7 +486,7 @@ class PipelineController(object):
             The current step in the pipeline will be sent for execution only after all the parent nodes
             have been executed successfully.
         :param parameter_override: Optional parameter overriding dictionary.
-            The dict values can reference a previously executed step using the following form '${step_name}'. Examples:
+            The dict values can reference a previously executed step using the following form ``'${step_name}'``. Examples:
 
           - Artifact access ``parameter_override={'Args/input_file': '${<step_name>.artifacts.<artifact_name>.url}' }``
           - Model access (last model used) ``parameter_override={'Args/input_file': '${<step_name>.models.output.-1.url}' }``
@@ -494,11 +500,11 @@ class PipelineController(object):
         :param configuration_overrides: Optional, override Task configuration objects.
             Expected dictionary of configuration object name and configuration object content.
             Examples:
-                {'General': dict(key='value')}
-                {'General': 'configuration file content'}
-                {'OmegaConf': YAML.dumps(full_hydra_dict)}
+                ``{'General': dict(key='value')}``
+                ``{'General': 'configuration file content'}``
+                ``{'OmegaConf': YAML.dumps(full_hydra_dict)}``
         :param task_overrides: Optional task section overriding dictionary.
-            The dict values can reference a previously executed step using the following form '${step_name}'. Examples:
+            The dict values can reference a previously executed step using the following form ``'${step_name}'``. Examples:
 
           - get the latest commit from a specific branch ``task_overrides={'script.version_num': '', 'script.branch': 'main'}``
           - match git repository branch to a previous step ``task_overrides={'script.branch': '${stage1.script.branch}', 'script.version_num': ''}``
@@ -549,7 +555,7 @@ class PipelineController(object):
             the Node is skipped and so is any node in the DAG that relies on this node.
 
             Notice the `parameters` are already parsed,
-            e.g. `${step1.parameters.Args/param}` is replaced with relevant value.
+            e.g. ``${step1.parameters.Args/param}`` is replaced with relevant value.
 
             .. code-block:: py
 
@@ -711,7 +717,7 @@ class PipelineController(object):
             task_type=None,  # type: Optional[str]
             auto_connect_frameworks=None,  # type: Optional[dict]
             auto_connect_arg_parser=None,  # type: Optional[dict]
-            packages=None,  # type: Optional[Union[str, Sequence[str]]]
+            packages=None,  # type: Optional[Union[bool, str, Sequence[str]]]
             repo=None,  # type: Optional[str]
             repo_branch=None,  # type: Optional[str]
             repo_commit=None,  # type: Optional[str]
@@ -774,7 +780,7 @@ class PipelineController(object):
             If not provided automatically take all function arguments & defaults
             Optional, pass input arguments to the function from other Tasks' output artifact.
             Example argument named `numpy_matrix` from Task ID `aabbcc` artifact name `answer`:
-            {'numpy_matrix': 'aabbcc.answer'}
+            ``{'numpy_matrix': 'aabbcc.answer'}``
         :param function_return: Provide a list of names for all the results.
             If not provided, no results will be stored as artifacts.
         :param project_name: Set the project name for the task. Required if base_task_id is None.
@@ -786,6 +792,7 @@ class PipelineController(object):
         :param packages: Manually specify a list of required packages or a local requirements.txt file.
             Example: ["tqdm>=2.1", "scikit-learn"] or "./requirements.txt"
             If not provided, packages are automatically added based on the imports used in the function.
+            Use `False` to install requirements from "requirements.txt" inside your git repository
         :param repo: Optional, specify a repository to attach to the function, when remotely executing.
             Allow users to execute the function inside the specified repository, enabling to load modules/script
             from a repository Notice the execution work directory will be the repository root folder.
@@ -842,7 +849,7 @@ class PipelineController(object):
             the Node is skipped and so is any node in the DAG that relies on this node.
 
             Notice the `parameters` are already parsed,
-            e.g. `${step1.parameters.Args/param}` is replaced with relevant value.
+            e.g. ``${step1.parameters.Args/param}`` is replaced with relevant value.
 
             .. code-block:: py
 
@@ -991,7 +998,7 @@ class PipelineController(object):
             the Node is skipped and so is any node in the DAG that relies on this node.
 
             Notice the `parameters` are already parsed,
-            e.g. `${step1.parameters.Args/param}` is replaced with relevant value.
+            e.g. ``${step1.parameters.Args/param}`` is replaced with relevant value.
 
             .. code-block:: py
 
@@ -1175,7 +1182,7 @@ class PipelineController(object):
         artifact_object,  # type: Any
         metadata=None,  # type: Optional[Mapping]
         delete_after_upload=False,  # type: bool
-        auto_pickle=True,  # type: bool
+        auto_pickle=None,  # type: Optional[bool]
         preview=None,  # type: Any
         wait_on_upload=False,  # type: bool
         serialization_function=None  # type: Optional[Callable[[Any], Union[bytes, bytearray]]]
@@ -1212,16 +1219,17 @@ class PipelineController(object):
             - ``True`` - Delete the local copy of the artifact.
             - ``False`` - Do not delete. (default)
 
-        :param bool auto_pickle: If True (default), and the artifact_object is not one of the following types:
+        :param bool auto_pickle: If True, and the artifact_object is not one of the following types:
             pathlib2.Path, dict, pandas.DataFrame, numpy.ndarray, PIL.Image, url (string), local_file (string)
             the artifact_object will be pickled and uploaded as pickle file artifact (with file extension .pkl)
+            If set to None (default) the sdk.development.artifacts.auto_pickle configuration value will be used.
 
         :param Any preview: The artifact preview
 
         :param bool wait_on_upload: Whether the upload should be synchronous, forcing the upload to complete
             before continuing.
 
-        :param Callable[Any, Union[bytes, bytearray]] serialization_function: A serialization function that takes one
+        :param serialization_function: A serialization function that takes one
             parameter of any type which is the object to be serialized. The function should return
             a `bytes` or `bytearray` object, which represents the serialized object. Note that the object will be
             immediately serialized using this function, thus other serialization methods will not be used
@@ -1416,7 +1424,7 @@ class PipelineController(object):
         The parameter can be used as input parameter for any step in the pipeline.
         Notice all parameters will appear under the PipelineController Task's Hyper-parameters -> Pipeline section
         Example: pipeline.add_parameter(name='dataset', description='dataset ID to process the pipeline')
-        Then in one of the steps we can refer to the value of the parameter with '${pipeline.dataset}'
+        Then in one of the steps we can refer to the value of the parameter with ``'${pipeline.dataset}'``
 
         :param name: String name of the parameter.
         :param default: Default value to be put as the default value (can be later changed in the UI)
@@ -1438,6 +1446,170 @@ class PipelineController(object):
         return self._pipeline_args
 
     @classmethod
+    def _create_pipeline_project_args(cls, name, project):
+        task_name = name or project or '{}'.format(datetime.now())
+        if cls._pipeline_as_sub_project():
+            parent_project = (project + "/" if project else "") + cls._project_section
+            project_name = "{}/{}".format(parent_project, task_name)
+        else:
+            parent_project = None
+            project_name = project or 'Pipelines'
+        return {"task_name": task_name, "parent_project": parent_project, "project_name": project_name}
+
+    @classmethod
+    def _create_pipeline_projects(cls, task, parent_project, project_name):
+        # make sure project is hidden
+        if not cls._pipeline_as_sub_project():
+            return
+        get_or_create_project(Task._get_default_session(), project_name=parent_project, system_tags=["hidden"])
+        return get_or_create_project(
+            Task._get_default_session(),
+            project_name=project_name,
+            project_id=task.project,
+            system_tags=cls._project_system_tags,
+        )
+
+    @classmethod
+    def create(
+        cls,
+        project_name,  # type: str
+        task_name,  # type: str
+        repo=None,  # type: str
+        branch=None,  # type: Optional[str]
+        commit=None,  # type: Optional[str]
+        script=None,  # type: Optional[str]
+        working_directory=None,  # type: Optional[str]
+        packages=None,  # type: Optional[Union[bool, Sequence[str]]]
+        requirements_file=None,  # type: Optional[Union[str, Path]]
+        docker=None,  # type: Optional[str]
+        docker_args=None,  # type: Optional[str]
+        docker_bash_setup_script=None,  # type: Optional[str]
+        argparse_args=None,  # type: Optional[Sequence[Tuple[str, str]]]
+        force_single_script_file=False,  # type: bool
+        version=None,  # type: Optional[str]
+        add_run_number=True,  # type: bool
+    ):
+        # type: (...) -> PipelineController
+        """
+        Manually create and populate a new Pipeline in the system.
+        Supports pipelines from functions, decorators and tasks.
+
+        :param project_name: Set the project name for the pipeline.
+        :param task_name: Set the name of the remote pipeline..
+        :param repo: Remote URL for the repository to use, or path to local copy of the git repository.
+            Example: 'https://github.com/allegroai/clearml.git' or '~/project/repo'. If ``repo`` is specified, then
+            the ``script`` parameter must also be specified
+        :param branch: Select specific repository branch/tag (implies the latest commit from the branch)
+        :param commit: Select specific commit ID to use (default: latest commit,
+            or when used with local repository matching the local commit ID)
+        :param script: Specify the entry point script for the remote execution. When used in tandem with
+            remote git repository the script should be a relative path inside the repository,
+            for example: './source/train.py' . When used with local repository path it supports a
+            direct path to a file inside the local repository itself, for example: '~/project/source/train.py'
+        :param working_directory: Working directory to launch the script from. Default: repository root folder.
+            Relative to repo root or local folder.
+        :param packages: Manually specify a list of required packages. Example: ``["tqdm>=2.1", "scikit-learn"]``
+            or `True` to automatically create requirements
+            based on locally installed packages (repository must be local).
+        :param requirements_file: Specify requirements.txt file to install when setting the session.
+            If not provided, the requirements.txt from the repository will be used.
+        :param docker: Select the docker image to be executed in by the remote session
+        :param docker_args: Add docker arguments, pass a single string
+        :param docker_bash_setup_script: Add bash script to be executed
+            inside the docker before setting up the Task's environment
+        :param argparse_args: Arguments to pass to the remote execution, list of string pairs (argument, value)
+            Notice, only supported if the codebase itself uses argparse.ArgumentParser
+        :param force_single_script_file: If True, do not auto-detect local repository
+
+        :return: The newly created PipelineController
+        """
+        pipeline_project_args = cls._create_pipeline_project_args(
+            name=task_name, project=project_name
+        )
+        pipeline_controller = Task.create(
+            project_name=pipeline_project_args["project_name"],
+            task_name=pipeline_project_args["task_name"],
+            task_type=Task.TaskTypes.controller,
+            repo=repo,
+            branch=branch,
+            commit=commit,
+            script=script,
+            working_directory=working_directory,
+            packages=packages,
+            requirements_file=requirements_file,
+            docker=docker,
+            docker_args=docker_args,
+            docker_bash_setup_script=docker_bash_setup_script,
+            argparse_args=argparse_args,
+            add_task_init_call=False,
+            force_single_script_file=force_single_script_file
+        )
+        cls._create_pipeline_projects(
+            task=pipeline_controller,
+            parent_project=pipeline_project_args["parent_project"],
+            project_name=pipeline_project_args["project_name"],
+        )
+        pipeline_controller.set_system_tags((pipeline_controller.get_system_tags() or []) + [cls._tag])
+        pipeline_controller.set_user_properties(version=version or cls._default_pipeline_version)
+        if add_run_number:
+            cls._add_pipeline_name_run_number(pipeline_controller)
+        print(pipeline_controller.get_output_log_web_page())
+        return cls._create_pipeline_controller_from_task(pipeline_controller)
+
+    @classmethod
+    def clone(
+        cls,
+        pipeline_controller,  # type: Union[PipelineController, str]
+        name=None,  # type: Optional[str]
+        comment=None,  # type: Optional[str]
+        parent=None,  # type: Optional[str]
+        project=None,  # type: Optional[str]
+        version=None  # type: Optional[str]
+    ):
+        # type: (...) -> PipelineController
+        """
+        Create a duplicate (a clone) of a pipeline (experiment). The status of the cloned pipeline is ``Draft``
+        and modifiable.
+
+        :param str pipeline_controller: The pipeline to clone. Specify a PipelineController object or an ID.
+        :param str name: The name of the new cloned pipeline.
+        :param str comment: A comment / description for the new cloned pipeline.
+        :param str parent: The ID of the parent Task of the new pipeline.
+
+          - If ``parent`` is not specified, then ``parent`` is set to ``source_task.parent``.
+          - If ``parent`` is not specified and ``source_task.parent`` is not available,
+          then ``parent`` set to ``source_task``.
+
+        :param str project: The project name in which to create the new pipeline.
+            If ``None``, the clone inherits the original pipeline's project
+        :param str version: The version of the new cloned pipeline. If ``None``, the clone
+            inherits the original pipeline's version
+
+        :return: The new cloned PipelineController
+        """
+        if isinstance(pipeline_controller, six.string_types):
+            pipeline_controller = Task.get_task(task_id=pipeline_controller)
+        elif isinstance(pipeline_controller, PipelineController):
+            pipeline_controller = pipeline_controller.task
+
+        if project or name:
+            pipeline_project_args = cls._create_pipeline_project_args(
+                name=name or pipeline_controller.name, project=project or pipeline_controller.get_project_name()
+            )
+            project = cls._create_pipeline_projects(
+                task=pipeline_controller,
+                parent_project=pipeline_project_args["parent_project"],
+                project_name=pipeline_project_args["project_name"],
+            )
+            name = pipeline_project_args["task_name"]
+        cloned_controller = Task.clone(
+            source_task=pipeline_controller, name=name, comment=comment, parent=parent, project=project
+        )
+        if version:
+            cloned_controller.set_user_properties(version=version)
+        return cls._create_pipeline_controller_from_task(cloned_controller)
+
+    @classmethod
     def enqueue(cls, pipeline_controller, queue_name=None, queue_id=None, force=False):
         # type: (Union[PipelineController, str], Optional[str], Optional[str], bool) -> Any
         """
@@ -1445,7 +1617,7 @@ class PipelineController(object):
 
         .. note::
            A worker daemon must be listening at the queue for the worker to fetch the Task and execute it,
-           see `ClearML Agent <../clearml_agent>`_ in the ClearML Documentation.
+           see "ClearML Agent" in the ClearML Documentation.
 
         :param pipeline_controller: The PipelineController to enqueue. Specify a PipelineController object or PipelineController ID
         :param queue_name: The name of the queue. If not specified, then ``queue_id`` must be specified.
@@ -1552,6 +1724,10 @@ class PipelineController(object):
                     error_msg += ", pipeline_version={}".format(pipeline_version)
                 raise ValueError(error_msg)
         pipeline_task = Task.get_task(task_id=pipeline_id)
+        return cls._create_pipeline_controller_from_task(pipeline_task)
+
+    @classmethod
+    def _create_pipeline_controller_from_task(cls, pipeline_task):
         pipeline_object = cls.__new__(cls)
         pipeline_object._task = pipeline_task
         pipeline_object._nodes = {}
@@ -1562,6 +1738,11 @@ class PipelineController(object):
         except Exception:
             pass
         return pipeline_object
+
+    @property
+    def task(self):
+        # type: () -> Task
+        return self._task
 
     @property
     def id(self):
@@ -1661,7 +1842,7 @@ class PipelineController(object):
             the Node is skipped and so is any node in the DAG that relies on this node.
 
             Notice the `parameters` are already parsed,
-            e.g. `${step1.parameters.Args/param}` is replaced with relevant value.
+            e.g. ``${step1.parameters.Args/param}`` is replaced with relevant value.
 
             .. code-block:: py
 
@@ -2064,7 +2245,7 @@ class PipelineController(object):
             task_type=None,  # type: Optional[str]
             auto_connect_frameworks=None,  # type: Optional[dict]
             auto_connect_arg_parser=None,  # type: Optional[dict]
-            packages=None,  # type: Optional[Union[str, Sequence[str]]]
+            packages=None,  # type: Optional[Union[bool, str, Sequence[str]]]
             repo=None,  # type: Optional[str]
             repo_branch=None,  # type: Optional[str]
             repo_commit=None,  # type: Optional[str]
@@ -2127,7 +2308,7 @@ class PipelineController(object):
             If not provided automatically take all function arguments & defaults
             Optional, pass input arguments to the function from other Tasks's output artifact.
             Example argument named `numpy_matrix` from Task ID `aabbcc` artifact name `answer`:
-            {'numpy_matrix': 'aabbcc.answer'}
+            ``{'numpy_matrix': 'aabbcc.answer'}``
         :param function_return: Provide a list of names for all the results.
             If not provided, no results will be stored as artifacts.
         :param project_name: Set the project name for the task. Required if base_task_id is None.
@@ -2139,6 +2320,7 @@ class PipelineController(object):
         :param packages: Manually specify a list of required packages or a local requirements.txt file.
             Example: ["tqdm>=2.1", "scikit-learn"] or "./requirements.txt"
             If not provided, packages are automatically added based on the imports used in the function.
+            Use `False` to install requirements from "requirements.txt" inside your git repository
         :param repo: Optional, specify a repository to attach to the function, when remotely executing.
             Allow users to execute the function inside the specified repository, enabling to load modules/script
             from a repository Notice the execution work directory will be the repository root folder.
@@ -2195,7 +2377,7 @@ class PipelineController(object):
             the Node is skipped and so is any node in the DAG that relies on this node.
 
             Notice the `parameters` are already parsed,
-            e.g. `${step1.parameters.Args/param}` is replaced with relevant value.
+            e.g. ``${step1.parameters.Args/param}`` is replaced with relevant value.
 
             .. code-block:: py
 
@@ -2469,7 +2651,7 @@ class PipelineController(object):
         extra_args = dict()
         extra_args["project"] = self._get_target_project(return_project_id=True) or None
         # set Task name to match job name
-        if self._pipeline_as_sub_project:
+        if self._pipeline_as_sub_project():
             extra_args["name"] = node.name
         if node.explicit_docker_image:
             extra_args["explicit_docker_image"] = node.explicit_docker_image
@@ -2503,6 +2685,7 @@ class PipelineController(object):
                 task_overrides=task_overrides,
                 allow_caching=node.cache_executed_step,
                 output_uri=node.output_uri,
+                enable_local_imports=self._enable_local_imports,
                 **extra_args
             )
         except Exception:
@@ -3015,7 +3198,7 @@ class PipelineController(object):
     def _parse_step_ref(self, value, recursive=False):
         # type: (Any) -> Optional[str]
         """
-        Return the step reference. For example "${step1.parameters.Args/param}"
+        Return the step reference. For example ``"${step1.parameters.Args/param}"``
         :param value: string
         :param recursive: if True, recursively parse all values in the dict, list or tuple
         :return:
@@ -3047,7 +3230,7 @@ class PipelineController(object):
     def _parse_task_overrides(self, task_overrides):
         # type: (dict) -> dict
         """
-        Return the step reference. For example "${step1.parameters.Args/param}"
+        Return the step reference. For example ``"${step1.parameters.Args/param}"``
         :param task_overrides: string
         :return:
         """
@@ -3190,23 +3373,24 @@ class PipelineController(object):
             session=self._task.session if self._task else Task.default_session,
             project_name=self._target_project)
 
-    def _add_pipeline_name_run_number(self):
+    @classmethod
+    def _add_pipeline_name_run_number(cls, task):
         # type: () -> None
-        if not self._task:
+        if not task:
             return
         # if we were already executed, do not rename (meaning aborted pipeline that was continued)
         # noinspection PyProtectedMember
-        if self._task._get_runtime_properties().get(self._runtime_property_hash):
+        if task._get_runtime_properties().get(cls._runtime_property_hash):
             return
 
         # remove the #<num> suffix if we have one:
-        task_name = re.compile(r" #\d+$").split(self._task.name or "", 1)[0]
+        task_name = re.compile(r" #\d+$").split(task.name or "", 1)[0]
         page_size = 100
         # find exact name or " #<num>" extension
-        prev_pipelines_ids = self._task.query_tasks(
+        prev_pipelines_ids = task.query_tasks(
             task_name=r"^{}(| #\d+)$".format(task_name),
             task_filter=dict(
-                project=[self._task.project], system_tags=[self._tag],
+                project=[task.project], system_tags=[cls._tag],
                 order_by=['-created'],
                 page_size=page_size,
                 fetch_only_first_page=True,
@@ -3219,8 +3403,8 @@ class PipelineController(object):
             # worst case fail to auto increment
             try:
                 # we assume we are the latest so let's take a few (last 10) and check the max number
-                last_task_name = self._task.query_tasks(
-                    task_filter=dict(task_ids=prev_pipelines_ids[:10], project=[self._task.project]),
+                last_task_name = task.query_tasks(
+                    task_filter=dict(task_ids=prev_pipelines_ids[:10], project=[task.project]),
                     additional_return_fields=['name'],
                 )  # type: List[Dict]
                 # let's parse the names
@@ -3239,7 +3423,7 @@ class PipelineController(object):
                 max_value = 0
 
         if max_value > 1:
-            self._task.set_name(task_name + " #{}".format(max_value))
+            task.set_name(task_name + " #{}".format(max_value))
 
     @classmethod
     def _get_pipeline_task(cls):
@@ -3265,11 +3449,11 @@ class PipelineController(object):
     def __verify_step_reference(self, node, step_ref_string):
         # type: (PipelineController.Node, str) -> Optional[str]
         """
-        Verify the step reference. For example "${step1.parameters.Args/param}"
+        Verify the step reference. For example ``"${step1.parameters.Args/param}"``
         Raise ValueError on misconfiguration
 
         :param Node node: calling reference node (used for logging)
-        :param str step_ref_string: For example "${step1.parameters.Args/param}"
+        :param str step_ref_string: For example ``"${step1.parameters.Args/param}"``
         :return: If step reference is used, return the pipeline step name, otherwise return None
         """
         parts = step_ref_string[2:-1].split('.')
@@ -3485,7 +3669,7 @@ class PipelineDecorator(PipelineController):
             docker=None,  # type: Optional[str]
             docker_args=None,  # type: Optional[str]
             docker_bash_setup_script=None,  # type: Optional[str]
-            packages=None,  # type: Optional[Union[str, Sequence[str]]]
+            packages=None,  # type: Optional[Union[bool, str, Sequence[str]]]
             repo=None,  # type: Optional[str]
             repo_branch=None,  # type: Optional[str]
             repo_commit=None,  # type: Optional[str]
@@ -3493,7 +3677,8 @@ class PipelineDecorator(PipelineController):
             artifact_deserialization_function=None,  # type: Optional[Callable[[bytes], Any]]
             output_uri=None,  # type: Optional[Union[str, bool]]
             skip_global_imports=False,  # type: bool
-            working_dir=None  # type: Optional[str]
+            working_dir=None,  # type: Optional[str]
+            enable_local_imports=True  # type: bool
     ):
         # type: (...) -> ()
         """
@@ -3541,6 +3726,7 @@ class PipelineDecorator(PipelineController):
         :param packages: Manually specify a list of required packages or a local requirements.txt file.
             Example: ["tqdm>=2.1", "scikit-learn"] or "./requirements.txt"
             If not provided, packages are automatically added.
+            Use `False` to install requirements from "requirements.txt" inside your git repository
         :param repo: Optional, specify a repository to attach to the pipeline controller, when remotely executing.
             Allow users to execute the controller inside the specified repository, enabling them to load modules/script
             from the repository. Notice the execution work directory will be the repository root folder.
@@ -3580,6 +3766,11 @@ class PipelineDecorator(PipelineController):
             global imports will be automatically imported in a safe manner at the beginning of each step’s execution.
             Default is False
         :param working_dir: Working directory to launch the pipeline from.
+        :param enable_local_imports: If True, allow pipeline steps to import from local files
+            by appending to the PYTHONPATH of each step the directory the pipeline controller
+            script resides in (sys.path[0]).
+            If False, the directory won't be appended to PYTHONPATH. Default is True.
+            Ignored while running remotely.
         """
         super(PipelineDecorator, self).__init__(
             name=name,
@@ -3603,9 +3794,9 @@ class PipelineDecorator(PipelineController):
             artifact_deserialization_function=artifact_deserialization_function,
             output_uri=output_uri,
             skip_global_imports=skip_global_imports,
-            working_dir=working_dir
+            working_dir=working_dir,
+            enable_local_imports=enable_local_imports
         )
-
         # if we are in eager execution, make sure parent class knows it
         if self._eager_execution_instance:
             self._mock_execution = True
@@ -3893,7 +4084,7 @@ class PipelineDecorator(PipelineController):
             artifact_serialization_function=self._artifact_serialization_function,
             artifact_deserialization_function=self._artifact_deserialization_function,
             skip_global_imports=self._skip_global_imports,
-            working_dir=working_dir,
+            working_dir=working_dir
         )
         return task_definition
 
@@ -3950,7 +4141,7 @@ class PipelineDecorator(PipelineController):
             return_values=('return_object', ),  # type: Union[str, Sequence[str]]
             name=None,  # type: Optional[str]
             cache=False,  # type: bool
-            packages=None,  # type: Optional[Union[str, Sequence[str]]]
+            packages=None,  # type: Optional[Union[bool, str, Sequence[str]]]
             parents=None,  # type:  Optional[List[str]]
             execution_queue=None,  # type: Optional[str]
             continue_on_fail=False,  # type: bool
@@ -3992,6 +4183,7 @@ class PipelineDecorator(PipelineController):
         :param packages: Manually specify a list of required packages or a local requirements.txt file.
             Example: ["tqdm>=2.1", "scikit-learn"] or "./requirements.txt"
             If not provided, packages are automatically added based on the imports used inside the wrapped function.
+            Use `False` to install requirements from "requirements.txt" inside your git repository
         :param parents: Optional list of parent nodes in the DAG.
             The current step in the pipeline will be sent for execution only after all the parent nodes
             have been executed successfully.
@@ -4076,7 +4268,7 @@ class PipelineDecorator(PipelineController):
             the Node is skipped and so is any node in the DAG that relies on this node.
 
             Notice the `parameters` are already parsed,
-            e.g. `${step1.parameters.Args/param}` is replaced with relevant value.
+            e.g. ``${step1.parameters.Args/param}`` is replaced with relevant value.
 
             .. code-block:: py
 
@@ -4415,7 +4607,7 @@ class PipelineDecorator(PipelineController):
             docker=None,  # type: Optional[str]
             docker_args=None,  # type: Optional[str]
             docker_bash_setup_script=None,  # type: Optional[str]
-            packages=None,  # type: Optional[Union[str, Sequence[str]]]
+            packages=None,  # type: Optional[Union[bool, str, Sequence[str]]]
             repo=None,  # type: Optional[str]
             repo_branch=None,  # type: Optional[str]
             repo_commit=None,  # type: Optional[str]
@@ -4423,7 +4615,8 @@ class PipelineDecorator(PipelineController):
             artifact_deserialization_function=None,  # type: Optional[Callable[[bytes], Any]]
             output_uri=None,  # type: Optional[Union[str, bool]]
             skip_global_imports=False,  # type: bool
-            working_dir=None  # type: Optional[str]
+            working_dir=None,  # type: Optional[str]
+            enable_local_imports=True  # type: bool
     ):
         # type: (...) -> Callable
         """
@@ -4502,6 +4695,7 @@ class PipelineDecorator(PipelineController):
         :param packages: Manually specify a list of required packages or a local requirements.txt file.
             Example: ["tqdm>=2.1", "scikit-learn"] or "./requirements.txt"
             If not provided, packages are automatically added based on the imports used in the function.
+            Use `False` to install requirements from "requirements.txt" inside your git repository
         :param repo: Optional, specify a repository to attach to the function, when remotely executing.
             Allow users to execute the function inside the specified repository, enabling them to load modules/script
             from the repository. Notice the execution work directory will be the repository root folder.
@@ -4541,6 +4735,11 @@ class PipelineDecorator(PipelineController):
             global imports will be automatically imported in a safe manner at the beginning of each step’s execution.
             Default is False
         :param working_dir:  Working directory to launch the pipeline from.
+        :param enable_local_imports: If True, allow pipeline steps to import from local files
+            by appending to the PYTHONPATH of each step the directory the pipeline controller
+            script resides in (sys.path[0]).
+            If False, the directory won't be appended to PYTHONPATH. Default is True.
+            Ignored while running remotely.
         """
         def decorator_wrap(func):
 
@@ -4589,7 +4788,8 @@ class PipelineDecorator(PipelineController):
                         artifact_deserialization_function=artifact_deserialization_function,
                         output_uri=output_uri,
                         skip_global_imports=skip_global_imports,
-                        working_dir=working_dir
+                        working_dir=working_dir,
+                        enable_local_imports=enable_local_imports
                     )
                     ret_val = func(**pipeline_kwargs)
                     LazyEvalWrapper.trigger_all_remote_references()
@@ -4643,7 +4843,8 @@ class PipelineDecorator(PipelineController):
                     artifact_deserialization_function=artifact_deserialization_function,
                     output_uri=output_uri,
                     skip_global_imports=skip_global_imports,
-                    working_dir=working_dir
+                    working_dir=working_dir,
+                    enable_local_imports=enable_local_imports
                 )
 
                 a_pipeline._args_map = args_map or {}
@@ -4805,11 +5006,11 @@ class PipelineDecorator(PipelineController):
                         if n not in _node.parents:
                             _node.parents.append(n)
                         break
-        if kwargs:
-            leaves = cls._singleton._find_executed_node_leaves()
-            _node.parents = (_node.parents or []) + [
-                x for x in cls._evaluated_return_values.get(tid, []) if x in leaves
-            ]
+
+        leaves = cls._singleton._find_executed_node_leaves()
+        _node.parents = (_node.parents or []) + [
+            x for x in cls._evaluated_return_values.get(tid, []) if x in leaves
+        ]
 
         if not cls._singleton._abort_running_steps_on_failure:
             for parent in _node.parents:

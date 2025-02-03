@@ -123,6 +123,7 @@ class Dataset(object):
     __hyperparams_section = "Datasets"
     __datasets_runtime_prop = "datasets"
     __orig_datasets_runtime_prop_prefix = "orig_datasets"
+    __dataset_struct = "Dataset Struct"
     __preview_media_max_file_size = deferred_config("dataset.preview.media.max_file_size", 5 * 1024 * 1024, transform=int)
     __preview_tabular_table_count = deferred_config("dataset.preview.tabular.table_count", 10, transform=int)
     __preview_tabular_row_count = deferred_config("dataset.preview.tabular.row_count", 10, transform=int)
@@ -551,7 +552,7 @@ class Dataset(object):
             k: v
             for k, v in self._dataset_link_entries.items()
             if not matches_any_wildcard(k, dataset_path, recursive=recursive)
-            and not matches_any_wildcard(v.link, dataset_path, recursive=recursive)
+            and not (matches_any_wildcard(v.link, dataset_path, recursive=recursive) or v.link == dataset_path)
         }
 
         removed = 0
@@ -636,6 +637,7 @@ class Dataset(object):
         chunk_size=None,
         max_workers=None,
         retries=3,
+        preview=True
     ):
         # type: (bool, bool, Optional[str], Optional[str], int, Optional[int], int) -> ()
         """
@@ -655,10 +657,13 @@ class Dataset(object):
           - 1: if the upload destination is a cloud provider ('s3', 'gs', 'azure')
           - number of logical cores: otherwise
         :param int retries: Number of retries before failing to upload each zip. If 0, the upload is not retried.
+        :param preview: If True (defaul) the dataset preview is uploaded and shown in the UI.
 
         :raise: If the upload failed (i.e. at least one zip failed to upload), raise a `ValueError`
         """
-        self._report_dataset_preview()
+        if preview:
+            self._report_dataset_preview()
+
         if Dataset.is_offline():
             self._serialize()
             return
@@ -1913,7 +1918,7 @@ class Dataset(object):
             If False, don't search inside subprojects (except for the special `.datasets` subproject)
         :param include_archived: If True, include archived datasets as well.
         :return: List of dictionaries with dataset information
-            Example: [{'name': name, 'project': project name, 'id': dataset_id, 'created': date_created},]
+            Example: ``[{'name': name, 'project': project name, 'id': dataset_id, 'created': date_created},]``
         """
         # if include_archived is False, we need to add the system tag __$not:archived to filter out archived datasets
         if not include_archived:
@@ -2077,13 +2082,35 @@ class Dataset(object):
         self.update_changed_files(num_files_added=count - modified_count, num_files_modified=modified_count)
         return count - modified_count, modified_count
 
+    def _repair_dependency_graph(self):
+        """
+        Repair dependency graph via the Dataset Struct configuration object.
+        Might happen for datasets with external files in old clearml versions
+        """
+        try:
+            dataset_struct = self._task.get_configuration_object_as_dict(Dataset.__dataset_struct)
+            new_dependency_graph = {}
+            for dataset in dataset_struct.values():
+                new_dependency_graph[dataset["job_id"]] = [dataset_struct[p]["job_id"] for p in dataset["parents"]]
+            self._dependency_graph = new_dependency_graph
+        except Exception as e:
+            LoggerRoot.get_base_logger().warning("Could not repair dependency graph. Error is: {}".format(e))
+
     def _update_dependency_graph(self):
         """
-        Update the dependency graph based on the current self._dataset_file_entries state
+        Update the dependency graph based on the current self._dataset_file_entries
+        and self._dataset_link_entries states
         :return:
         """
         # collect all dataset versions
-        used_dataset_versions = set(f.parent_dataset_id for f in self._dataset_file_entries.values())
+        used_dataset_versions = set(f.parent_dataset_id for f in self._dataset_file_entries.values()) | set(
+            f.parent_dataset_id for f in self._dataset_link_entries.values()
+        )
+        for dataset_id in used_dataset_versions:
+            if dataset_id not in self._dependency_graph and dataset_id != self._id:
+                self._repair_dependency_graph()
+                break
+
         used_dataset_versions.add(self._id)
         current_parents = self._dependency_graph.get(self._id) or []
         # remove parent versions we no longer need from the main version list
@@ -2236,14 +2263,14 @@ class Dataset(object):
 
     def _get_dataset_files(
         self,
-        force=False,
-        selected_chunks=None,
-        lock_target_folder=False,
-        cleanup_target_folder=True,
-        target_folder=None,
-        max_workers=None
+        force=False,  # type: bool
+        selected_chunks=None,  # type: Optional[List[int]]
+        lock_target_folder=False,  # type: bool
+        cleanup_target_folder=True,  # type: bool
+        target_folder=None,  # type: Optional[Path]
+        max_workers=None,  # type: Optional[int]
+        link_entries_of_interest=None  # type: Optional[Dict[str, LinkEntry]]
     ):
-        # type: (bool, Optional[List[int]], bool, bool, Optional[Path], Optional[int]) -> str
         """
         First, extracts the archive present on the ClearML server containing this dataset's files.
         Then, download the remote files. Note that if a remote file was added to the ClearML server, then
@@ -2260,6 +2287,8 @@ class Dataset(object):
         :param target_folder: If provided use the specified target folder, default, auto generate from Dataset ID.
         :param max_workers: Number of threads to be spawned when getting dataset files. Defaults
             to the number of virtual cores.
+        :param link_entries_of_interest: Download only the external files in this dictionary.
+        Useful when one doesn't want to download all the files in a parent dataset, as some files might be removed
 
         :return: Path to the local storage where the data was downloaded
         """
@@ -2273,14 +2302,21 @@ class Dataset(object):
             max_workers=max_workers
         )
         self._download_external_files(
-            target_folder=target_folder, lock_target_folder=lock_target_folder, max_workers=max_workers
+            target_folder=target_folder,
+            lock_target_folder=lock_target_folder,
+            max_workers=max_workers,
+            link_entries_of_interest=link_entries_of_interest,
         )
         return local_folder
 
     def _download_external_files(
-        self, target_folder=None, lock_target_folder=False, max_workers=None
+        self,
+        target_folder=None,
+        lock_target_folder=False,
+        max_workers=None,
+        link_entries_of_interest=None
     ):
-        # (Union(Path, str), bool) -> None
+        # (Union(Path, str), bool, Optional[int], Optional[Dict[str, LinkEntry]]) -> None
         """
         Downloads external files in the dataset. These files will be downloaded
         at relative_path (the path relative to the target_folder). Note that
@@ -2291,30 +2327,11 @@ class Dataset(object):
         :param lock_target_folder: If True, local the target folder so the next cleanup will not delete
             Notice you should unlock it manually, or wait for the process to finish for auto unlocking.
         :param max_workers: Number of threads to be spawned when getting dataset files. Defaults to no multi-threading.
+        :param link_entries_of_interest: Download only the external files in this dictionary.
+        Useful when one doesn't want to download all the files in a parent dataset, as some files might be removed
         """
-        target_folder = (
-            Path(target_folder)
-            if target_folder
-            else self._create_ds_target_folder(
-                lock_target_folder=lock_target_folder
-            )[0]
-        ).as_posix()
-        dependencies = self._get_dependencies_by_order(
-            include_unused=False, include_current=True
-        )
-        links = {}
-        for dependency in dependencies:
-            ds = Dataset.get(dependency)
-            links.update(ds._dataset_link_entries)
-        links.update(self._dataset_link_entries)
-
         def _download_link(link, target_path):
             if os.path.exists(target_path):
-                LoggerRoot.get_base_logger().info(
-                    "{} already exists. Skipping downloading {}".format(
-                        target_path, link
-                    )
-                )
                 return
             ok = False
             error = None
@@ -2337,27 +2354,41 @@ class Dataset(object):
                 LoggerRoot.get_base_logger().info(log_string)
             else:
                 link.size = Path(target_path).stat().st_size
-        if not max_workers:
-            for relative_path, link in links.items():
-                if not is_path_traversal(target_folder, relative_path):
-                    target_path = os.path.join(target_folder, relative_path)
-                else:
-                    LoggerRoot.get_base_logger().warning(
-                        "Ignoring relative path `{}`: it must not traverse directories".format(relative_path)
-                    )
-                    target_path = os.path.join(target_folder, os.path.basename(relative_path))
+
+        def _get_target_path(relative_path, target_folder):
+            if not is_path_traversal(target_folder, relative_path):
+                return os.path.join(target_folder, relative_path)
+            else:
+                LoggerRoot.get_base_logger().warning(
+                    "Ignoring relative path `{}`: it must not traverse directories".format(relative_path)
+                )
+                return os.path.join(target_folder, os.path.basename(relative_path))
+
+        def _submit_download_link(relative_path, link, target_folder, pool=None):
+            if link.parent_dataset_id != self.id and not link.parent_dataset_id.startswith("offline-"):
+                return
+            target_path = _get_target_path(relative_path, target_folder)
+            if pool is None:
                 _download_link(link, target_path)
+            else:
+                pool.submit(_download_link, link, target_path)
+
+        target_folder = (
+            Path(target_folder)
+            if target_folder
+            else self._create_ds_target_folder(
+                lock_target_folder=lock_target_folder
+            )[0]
+        ).as_posix()
+
+        link_entries_of_interest = link_entries_of_interest or self._dataset_link_entries
+        if not max_workers:
+            for relative_path, link in link_entries_of_interest.items():
+                _submit_download_link(relative_path, link, target_folder)
         else:
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                for relative_path, link in links.items():
-                    if not is_path_traversal(target_folder, relative_path):
-                        target_path = os.path.join(target_folder, relative_path)
-                    else:
-                        LoggerRoot.get_base_logger().warning(
-                            "Ignoring relative path `{}`: it must not traverse directories".format(relative_path)
-                        )
-                        target_path = os.path.join(target_folder, os.path.basename(relative_path))
-                    pool.submit(_download_link, link, target_path)
+                for relative_path, link in link_entries_of_interest.items():
+                    _submit_download_link(relative_path, link, target_folder, pool=pool)
 
     def _extract_dataset_archive(
             self,
@@ -2582,6 +2613,7 @@ class Dataset(object):
         :param include_current: If True include the current dataset ID as the last ID in the list
         :return: list of str representing the datasets id
         """
+        self._update_dependency_graph()
         roots = [self._id]
         dependencies = []
         # noinspection DuplicatedCode
@@ -2737,6 +2769,13 @@ class Dataset(object):
             (id if k.startswith("offline-") else k): [(id if sub_v.startswith("offline-") else sub_v) for sub_v in v]
             for k, v in dataset._dependency_graph.items()  # noqa
         }
+        # noinspection PyProtectedMember
+        for entry in dataset._dataset_file_entries.values():
+            if entry.parent_dataset_id.startswith("offline-"):
+                entry.parent_dataset_id = id
+        for entry in dataset._dataset_link_entries.values():
+            if entry.parent_dataset_id.startswith("offline-"):
+                entry.parent_dataset_id = id
         # noinspection PyProtectedMember
         dataset._update_dependency_graph()
         # noinspection PyProtectedMember
@@ -3023,7 +3062,7 @@ class Dataset(object):
             # fetch the parents of this version (task) based on what we have on the Task itself.
             # noinspection PyBroadException
             try:
-                dataset_version_node = task.get_configuration_object_as_dict("Dataset Struct")
+                dataset_version_node = task.get_configuration_object_as_dict(Dataset.__dataset_struct)
                 # fine the one that is us
                 for node in dataset_version_node.values():
                     if node["job_id"] != id_:
@@ -3052,7 +3091,7 @@ class Dataset(object):
             dataset_struct[indices[id_]]["parents"] = [indices[p] for p in parents]
         # noinspection PyProtectedMember
         self._task._set_configuration(
-            name="Dataset Struct",
+            name=Dataset.__dataset_struct,
             description="Structure of the dataset",
             config_type="json",
             config_text=json.dumps(dataset_struct, indent=2),
@@ -3197,7 +3236,8 @@ class Dataset(object):
                 force=force,
                 lock_target_folder=True,
                 cleanup_target_folder=False,
-                max_workers=max_workers
+                max_workers=max_workers,
+                link_entries_of_interest=self._dataset_link_entries
             ))
             ds_base_folder.touch()
 
@@ -3230,7 +3270,8 @@ class Dataset(object):
 
                 return None
 
-            errors = pool.map(copy_file, self._dataset_file_entries.values())
+            errors = list(pool.map(copy_file, self._dataset_file_entries.values()))
+            errors.extend(list(pool.map(copy_file, self._dataset_link_entries.values())))
 
             CacheManager.get_cache_manager(cache_context=self.__cache_context).unlock_cache_folder(
                 ds_base_folder.as_posix())

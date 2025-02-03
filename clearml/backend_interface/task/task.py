@@ -93,6 +93,9 @@ class Task(IdObjectBase, AccessMixin, SetupUploadMixin):
         def __eq__(self, other):
             return str(self) == str(other)
 
+        def __repr__(self):
+            return "TaskTypes.{}".format(self.value)
+
         training = 'training'
         testing = 'testing'
         inference = "inference"
@@ -111,6 +114,9 @@ class Task(IdObjectBase, AccessMixin, SetupUploadMixin):
 
         def __eq__(self, other):
             return str(self) == str(other)
+
+        def __repr__(self):
+            return "TaskTypes.{}".format(self.value)
 
         created = "created"
         queued = "queued"
@@ -438,19 +444,19 @@ class Task(IdObjectBase, AccessMixin, SetupUploadMixin):
         """
         Returns the current Task's type.
 
-            Valid task types:
+        Valid task types:
 
-            - ``TaskTypes.training`` (default)
-            - ``TaskTypes.testing``
-            - ``TaskTypes.inference``
-            - ``TaskTypes.data_processing``
-            - ``TaskTypes.application``
-            - ``TaskTypes.monitor``
-            - ``TaskTypes.controller``
-            - ``TaskTypes.optimizer``
-            - ``TaskTypes.service``
-            - ``TaskTypes.qc``
-            - ``TaskTypes.custom``
+        - ``TaskTypes.training`` (default)
+        - ``TaskTypes.testing``
+        - ``TaskTypes.inference``
+        - ``TaskTypes.data_processing``
+        - ``TaskTypes.application``
+        - ``TaskTypes.monitor``
+        - ``TaskTypes.controller``
+        - ``TaskTypes.optimizer``
+        - ``TaskTypes.service``
+        - ``TaskTypes.qc``
+        - ``TaskTypes.custom``
         """
         return self.data.type
 
@@ -689,6 +695,28 @@ class Task(IdObjectBase, AccessMixin, SetupUploadMixin):
             ignore_errors=ignore_errors
         )
 
+    def stop_request(self, ignore_errors=True, force=False, status_message=None):
+        # type: (bool, bool, Optional[str]) -> ()
+        """
+        Request a task to stop. this will not change the task status
+        but mark a request for an agent or SDK to actually stop the Task.
+        This will trigger the Task's abort callback, and at the end will
+        change the task status to stopped and kill the Task's processes
+
+        Notice: calling this on your own Task, will cause
+        the watchdog to call the on_abort callback and kill the process
+
+        :param bool force: If not True, call fails if the task status is not 'in_progress'
+        :param bool ignore_errors: if False raise exception on error
+        :param str status_message: Optional, add status change message to the stop request.
+            This message will be stored as status_message on the Task's info panel
+        """
+        # request task stop
+        return self.send(
+            tasks.StopRequest(self.id, force=force, status_reason="abort request", status_message=status_message),
+            ignore_errors=ignore_errors
+        )
+
     def completed(self, ignore_errors=True):
         # type: (bool) -> ()
         """
@@ -917,11 +945,11 @@ class Task(IdObjectBase, AccessMixin, SetupUploadMixin):
 
         return task_deleted
 
-    def _delete_uri(self, uri):
-        # type: (str) -> bool
+    def _delete_uri(self, uri, silent=False):
+        # type: (str, bool) -> bool
         # noinspection PyBroadException
         try:
-            deleted = StorageHelper.get(uri).delete(uri)
+            deleted = StorageHelper.get(uri).delete(uri, silent=silent)
             if deleted:
                 self.log.debug("Deleted file: {}".format(uri))
                 return True
@@ -984,7 +1012,7 @@ class Task(IdObjectBase, AccessMixin, SetupUploadMixin):
         If no `output_uri` was specified, the default files-server will be used to store the model file/s.
 
         :param model_path: A local weights file or folder to be uploaded.
-            If remote URI is provided (e.g. http:// or s3: // etc) then the URI is stored as is, without any upload
+            If remote URI is provided (e.g. ``http://`` or ``s3://`` etc) then the URI is stored as is, without any upload
         :param name: The updated model name.
             If not provided, the name is the model weights file filename without the extension.
         :param comment: The updated model description. (Optional)
@@ -1119,10 +1147,10 @@ class Task(IdObjectBase, AccessMixin, SetupUploadMixin):
         Get the parameters for a Task. This method returns a complete group of key-value parameter pairs, but does not
         support parameter descriptions (the result is a dictionary of key-value pairs).
         Notice the returned parameter dict is flat:
-        i.e. {'Args/param': 'value'} is the argument "param" from section "Args"
+        i.e. ``{'Args/param': 'value'}`` is the argument "param" from section "Args"
 
         :param backwards_compatibility: If True (default), parameters without section name
-            (API version < 2.9, clearml-server < 0.16) will be at dict root level.
+            (API version ``<2.9``, clearml-server ``<0.16``) will be at dict root level.
             If False, parameters without section name, will be nested under "Args/" key.
         :param cast: If True, cast the parameter to the original type. Default False,
             values are returned in their string representation
@@ -1158,7 +1186,7 @@ class Task(IdObjectBase, AccessMixin, SetupUploadMixin):
         Set the parameters for a Task. This method sets a complete group of key-value parameter pairs, but does not
         support parameter descriptions (the input is a dictionary of key-value pairs).
         Notice the parameter dict is flat:
-        i.e. {'Args/param': 'value'} will set the argument "param" in section "Args" to "value"
+        i.e. ``{'Args/param': 'value'}`` will set the argument "param" in section "Args" to "value"
 
         :param args: Positional arguments, which are one or more dictionaries or (key, value) iterable. They are
             merged into a single key-value pair dictionary.
@@ -1380,7 +1408,7 @@ class Task(IdObjectBase, AccessMixin, SetupUploadMixin):
         Update the parameters for a Task. This method updates a complete group of key-value parameter pairs, but does
         not support parameter descriptions (the input is a dictionary of key-value pairs).
         Notice the parameter dict is flat:
-        i.e. {'Args/param': 'value'} will set the argument "param" in section "Args" to "value"
+        i.e. ``{'Args/param': 'value'}`` will set the argument "param" in section "Args" to "value"
 
         :param args: Positional arguments, which are one or more dictionaries or (key, value) iterable. They are
             merged into a single key-value pair dictionary.
@@ -1533,8 +1561,8 @@ class Task(IdObjectBase, AccessMixin, SetupUploadMixin):
                 self._edit(execution=execution)
         return self.data.execution.artifacts or []
 
-    def delete_artifacts(self, artifact_names, raise_on_errors=True, delete_from_storage=True):
-        # type: (Sequence[str], bool, bool) -> bool
+    def delete_artifacts(self, artifact_names, raise_on_errors=True, delete_from_storage=True, silent_on_errors=False):
+        # type: (Sequence[str], bool, bool, bool) -> bool
         """
         Delete a list of artifacts, by artifact name, from the Task.
 
@@ -1542,20 +1570,29 @@ class Task(IdObjectBase, AccessMixin, SetupUploadMixin):
         :param bool raise_on_errors: if True, do not suppress connectivity related exceptions
         :param bool delete_from_storage: If True, try to delete the actual
             file from the external storage (e.g. S3, GS, Azure, File Server etc.)
+        :param silent_on_errors: If True, do not log connectivity related errors
 
         :return: True if successful
         """
-        return self._delete_artifacts(artifact_names, raise_on_errors, delete_from_storage)
+        return self._delete_artifacts(
+            artifact_names=artifact_names,
+            raise_on_errors=raise_on_errors,
+            delete_from_storage=delete_from_storage,
+            silent_on_errors=silent_on_errors
+        )
 
-    def _delete_artifacts(self, artifact_names, raise_on_errors=False, delete_from_storage=True):
-        # type: (Sequence[str], bool, bool) -> bool
+    def _delete_artifacts(
+        self, artifact_names, raise_on_errors=False, delete_from_storage=True, silent_on_errors=False
+    ):
+        # type: (Sequence[str], bool, bool, bool) -> bool
         """
         Delete a list of artifacts, by artifact name, from the Task.
 
         :param list artifact_names: list of artifact names
         :param bool raise_on_errors: if True, do not suppress connectivity related exceptions
         :param bool delete_from_storage: If True, try to delete the actual
-        file from the external storage (e.g. S3, GS, Azure, File Server etc.)
+            file from the external storage (e.g. S3, GS, Azure, File Server etc.)
+        :param silent_on_errors: If True, do not log connectivity related errors
 
         :return: True if successful
         """
@@ -1599,7 +1636,7 @@ class Task(IdObjectBase, AccessMixin, SetupUploadMixin):
         if uris:
             for i, (artifact, uri) in enumerate(zip(artifact_names, uris)):
                 # delete the actual file from storage, and raise if error and needed
-                if uri and not self._delete_uri(uri) and raise_on_errors:
+                if uri and not self._delete_uri(uri, silent=silent_on_errors) and raise_on_errors:
                     remaining_uris = {name: uri for name, uri in zip(artifact_names[i + 1:], uris[i + 1:])}
                     raise ArtifactUriDeleteError(artifact=artifact, uri=uri, remaining_uris=remaining_uris)
 
@@ -1908,7 +1945,7 @@ class Task(IdObjectBase, AccessMixin, SetupUploadMixin):
         Return the Task results & outputs web page address.
         For example: https://demoapp.demo.clear.ml/projects/216431/experiments/60763e04/output/log
 
-        :return: http/s URL link.
+        :return: ``http/s`` URL link.
         """
         return self.get_task_output_log_web_page(
             task_id=self.id,
@@ -2785,7 +2822,7 @@ class Task(IdObjectBase, AccessMixin, SetupUploadMixin):
         :param str project_id: Project ID for this task.
         :param str app_server_host: ClearML Application server host name.
             If not provided, the current session will be used to resolve the host name.
-        :return: http/s URL link.
+        :return: ``http/s`` URL link.
         """
         if not app_server_host:
             if not hasattr(cls, "__cached_app_server_host"):

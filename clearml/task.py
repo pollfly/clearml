@@ -79,7 +79,7 @@ from .binding.gradio_bind import PatchGradio
 from .binding.frameworks import WeightsFileHandler
 from .config import (
     config, DEV_TASK_NO_REUSE, get_is_master_node, DEBUG_SIMULATE_REMOTE_TASK, DEV_DEFAULT_OUTPUT_URI,
-    deferred_config, TASK_SET_ITERATION_OFFSET)
+    deferred_config, TASK_SET_ITERATION_OFFSET, HOST_MACHINE_IP)
 from .config import running_remotely, get_remote_task_id
 from .config.cache import SessionCache
 from .debugging.log import LoggerRoot
@@ -113,6 +113,7 @@ if TYPE_CHECKING:
     import pandas
     import numpy
     from PIL import Image
+    from .router.router import HttpRouter  # noqa: F401
 
 # Forward declaration to help linters
 TaskInstance = TypeVar("TaskInstance", bound="Task")
@@ -180,8 +181,16 @@ class Task(_Task):
     __detect_repo_async = deferred_config('development.vcs_repo_detect_async', False)
     __default_output_uri = DEV_DEFAULT_OUTPUT_URI.get() or deferred_config('development.default_output_uri', None)
 
+    __hidden_tag = "hidden"
+
     _launch_multi_node_section = "launch_multi_node"
     _launch_multi_node_instance_tag = "multi_node_instance"
+
+    _external_endpoint_port_map = {"http": "_PORT", "tcp": "external_tcp_port"}
+    _external_endpoint_address_map = {"http": "_ADDRESS", "tcp": "external_address"}
+    _external_endpoint_service_map = {"http": "EXTERNAL", "tcp": "EXTERNAL_TCP"}
+    _external_endpoint_internal_port_map = {"http": "_PORT", "tcp": "upstream_task_port"}
+    _external_endpoint_host_tcp_port_mapping = {"tcp_host_mapping": "_external_host_tcp_port_mapping"}
 
     class _ConnectedParametersType(object):
         argparse = "argument_parser"
@@ -216,6 +225,8 @@ class Task(_Task):
         self._resource_monitor = None
         self._calling_filename = None
         self._remote_functions_generated = {}
+        self._external_endpoint_ports = {}
+        self._http_router = None
         # register atexit, so that we mark the task as stopped
         self._at_exit_called = False
 
@@ -336,7 +347,7 @@ class Task(_Task):
             files_server will be used for model storage. In the default location, ClearML creates a subfolder for the
             output. If set to False, local runs will not upload output models and artifacts,
             and remote runs will not use any default values provided using ``default_output_uri``.
-            The subfolder structure is the following: `<output destination name> / <project name> / <task name>.<Task ID>`.
+            The subfolder structure is the following: \\<output destination name\\> / \\<project name\\> / \\<task name\\>.\\<Task ID\\>.
             Note that for cloud storage, you must install the **ClearML** package for your cloud storage type,
             and then configure your storage credentials. For detailed information, see "Storage" in the ClearML
             Documentation.
@@ -384,9 +395,9 @@ class Task(_Task):
               frameworks. The dictionary keys are frameworks and the values are booleans, other dictionaries used for
               finer control or wildcard strings.
               In case of wildcard strings, the local path of a model file has to match at least one wildcard to be
-              saved/loaded by ClearML. Example: {'pytorch' : '*.pt', 'tensorflow': ['*.h5', '*']}
+              saved/loaded by ClearML. Example: ``{'pytorch' : '*.pt', 'tensorflow': ['*.h5', '*']}``
               Keys missing from the dictionary default to ``True``, and an empty dictionary defaults to ``False``.
-              Supported keys for finer control: {'tensorboard': {'report_hparams': bool}}  # whether to report TensorBoard hyperparameters
+              Supported keys for finer control: ``{'tensorboard': {'report_hparams': bool}}``  # whether to report TensorBoard hyperparameters
 
               For example:
 
@@ -840,6 +851,295 @@ class Task(_Task):
         task._set_startup_info()
         return task
 
+    def get_http_router(self):
+        # type: () -> HttpRouter
+        """
+        Retrieve an instance of `HttpRouter` to manage an external HTTP endpoint and intercept traffic.
+        The `HttpRouter` serves as a traffic manager, enabling the creation and configuration of local and external
+        routesto redirect, monitor, or manipulate HTTP requests and responses. It is designed to handle routing
+        needs such via a proxy setup which handles request/response interception and telemetry reporting for
+        applications that require HTTP endpoint management.
+
+        Example usage:
+
+        .. code-block:: py
+            def request_callback(request, persistent_state):
+                persistent_state["last_request_time"] = time.time()
+
+            def response_callback(response, request, persistent_state):
+                print("Latency:", time.time() - persistent_state["last_request_time"])
+                if urllib.parse.urlparse(str(request.url).rstrip("/")).path == "/modify":
+                    new_content = response.body.replace(b"modify", b"modified")
+                    headers = copy.deepcopy(response.headers)
+                    headers["Content-Length"] = str(len(new_content))
+                    return Response(status_code=response.status_code, headers=headers, content=new_content)
+
+            router = Task.current_task().get_http_router()
+            router.set_local_proxy_parameters(incoming_port=9000)
+            router.create_local_route(
+                source="/",
+                target="http://localhost:8000",
+                request_callback=request_callback,
+                response_callback=response_callback,
+                endpoint_telemetry={"model": "MyModel"}
+            )
+            router.deploy(wait=True)
+        """
+        try:
+            from .router.router import HttpRouter  # noqa
+        except ImportError:
+            raise UsageError("Could not import `HttpRouter`. Please run `pip install clearml[router]`")
+
+        if self._http_router is None:
+            self._http_router = HttpRouter(self)
+        return self._http_router
+
+    def request_external_endpoint(
+        self, port, protocol="http", wait=False, wait_interval_seconds=3.0, wait_timeout_seconds=90.0
+    ):
+        # type: (int, str, bool, float, float) -> Optional[Dict]
+        """
+        Request an external endpoint for an application
+
+        :param port: Port the application is listening to
+        :param protocol: `http` or `tcp`
+        :param wait: If True, wait for the endpoint to be assigned
+        :param wait_interval_seconds: The poll frequency when waiting for the endpoint
+        :param wait_timeout_seconds: If this timeout is exceeded while waiting for the endpoint,
+            the method will no longer wait and None will be returned
+
+        :return: If wait is False, this method will return None.
+            If no endpoint could be found while waiting, this method returns None.
+            Otherwise, it returns a dictionary containing the following values:
+            - endpoint - raw endpoint. One might need to authenticate in order to use this endpoint
+            - browser_endpoint - endpoint to be used in browser. Authentication will be handled via the browser
+            - port - the port exposed by the application
+            - protocol - the protocol used by the endpoint
+        """
+        Session.verify_feature_set("advanced")
+        if protocol not in self._external_endpoint_port_map.keys():
+            raise ValueError("Invalid protocol: {}".format(protocol))
+
+        # sync with router - get data from Task
+        if not self._external_endpoint_ports.get(protocol):
+            self.reload()
+            internal_port = self._get_runtime_properties().get(self._external_endpoint_internal_port_map[protocol])
+            if internal_port:
+                self._external_endpoint_ports[protocol] = internal_port
+
+            # notice this applies for both raw tcp and http, it is so that we can
+            # detect the host machine exposed ports, and register them on the router
+            external_host_port_mapping = self._get_runtime_properties().get(
+                self._external_endpoint_host_tcp_port_mapping["tcp_host_mapping"])
+            self._external_endpoint_ports["tcp_host_mapping"] = external_host_port_mapping
+
+        # check if we need to parse the port mapping, only if running on "bare-metal" host machine.
+        if self._external_endpoint_ports.get("tcp_host_mapping"):
+            external_host_port_mapping = self._external_endpoint_ports.get("tcp_host_mapping")
+            # format is docker standard port mapping format:
+            # example: "out:in,out_range100-out_range102:in_range0-in_range2"
+            # notice `out` in this context means the host port, the one that
+            # the router will route external traffic to
+            # noinspection PyBroadException
+            out_port = None
+            # noinspection PyBroadException
+            try:
+                for port_range in external_host_port_mapping.split(","):
+                    out_range, in_range = port_range.split(":", 1)
+                    out_range = out_range.split("-")
+                    in_range = in_range.split("-")
+                    if int(in_range[0]) <= port <= int(in_range[-1]):
+                        # we found a match:
+                        out_port = int(out_range[0]) + (port-int(in_range[0]))
+                        print("INFO: Task.request_external_endpoint(...) changed requested external port to {}, "
+                              "conforming to mapped external host ports [{} -> {}]".format(out_port, port, port_range))
+                        break
+
+                if not out_port:
+                    raise ValueError("match not found defaulting to original port")
+            except Exception:
+                print("WARNING: Task.request_external_endpoint(...) failed matching requested port to "
+                      "mapped external host port [{} to {}], "
+                      "proceeding with original port {}".format(port, external_host_port_mapping, port))
+
+            # change the requested port to the one we have on the machine
+            if out_port:
+                port = out_port
+
+        # check if we are trying to change the port - currently not allowed
+        if self._external_endpoint_ports.get(protocol):
+            if self._external_endpoint_ports.get(protocol) == port:
+                # we already set this endpoint, but we will set the values again, because maybe IP changed?!
+                pass
+            else:
+                raise ValueError(
+                    "Only one endpoint per protocol can be requested at the moment. "
+                    "Port already exposed is: {}".format(self._external_endpoint_ports.get(protocol))
+                )
+
+        # mark for the router our request
+        # noinspection PyProtectedMember
+        self._set_runtime_properties(
+            {
+                "_SERVICE": self._external_endpoint_service_map[protocol],
+                self._external_endpoint_address_map[protocol]: HOST_MACHINE_IP.get() or get_private_ip(),
+                self._external_endpoint_port_map[protocol]: port,
+            }
+        )
+        # required system_tag for the router to catch the routing request
+        self.set_system_tags(list(set((self.get_system_tags() or []) + ["external_service"])))
+        self._external_endpoint_ports[protocol] = port
+        if wait:
+            return self.wait_for_external_endpoint(
+                wait_interval_seconds=wait_interval_seconds,
+                wait_timeout_seconds=wait_timeout_seconds,
+                protocol=protocol
+            )
+        return None
+
+    def wait_for_external_endpoint(self, wait_interval_seconds=3.0, wait_timeout_seconds=90.0, protocol="http"):
+        # type: (float, float, Optional[str]) -> Union[Optional[Dict], List[Optional[Dict]]]
+        """
+        Wait for an external endpoint to be assigned
+
+        :param wait_interval_seconds: The poll frequency when waiting for the endpoint
+        :param wait_timeout_seconds: If this timeout is exceeded while waiting for the endpoint,
+            the method will no longer wait
+        :param protocol: `http` or `tcp`. Wait for an endpoint to be assigned based on the protocol.
+            If None, wait for all supported protocols
+
+        :return: If no endpoint could be found while waiting, this method returns None.
+            If a protocol has been specified, it returns a dictionary containing the following values:
+            - endpoint - raw endpoint. One might need to authenticate in order to use this endpoint
+            - browser_endpoint - endpoint to be used in browser. Authentication will be handled via the browser
+            - port - the port exposed by the application
+            - protocol - the protocol used by the endpoint
+            If not protocol is specified, it returns a list of dictionaries containing the values above,
+            for each protocol requested and waited
+        """
+        Session.verify_feature_set("advanced")
+        if protocol:
+            return self._wait_for_external_endpoint(
+                wait_interval_seconds=wait_interval_seconds,
+                wait_timeout_seconds=wait_timeout_seconds,
+                protocol=protocol,
+                warn=True
+            )
+        results = []
+        protocols = ["http", "tcp"]
+        waited_protocols = []
+        for protocol_ in protocols:
+            start_time = time.time()
+            result = self._wait_for_external_endpoint(
+                wait_interval_seconds=wait_interval_seconds,
+                wait_timeout_seconds=wait_timeout_seconds,
+                protocol=protocol_,
+                warn=False,
+            )
+            elapsed = time.time() - start_time
+            if result:
+                results.append(result)
+            wait_timeout_seconds -= elapsed
+            if wait_timeout_seconds > 0 or result:
+                waited_protocols.append(protocol_)
+        unwaited_protocols = [p for p in protocols if p not in waited_protocols]
+        if wait_timeout_seconds <= 0 and unwaited_protocols:
+            LoggerRoot.get_base_logger().warning(
+                "Timeout exceeded while waiting for {} endpoint(s)".format(",".join(unwaited_protocols))
+            )
+        return results
+
+    def _wait_for_external_endpoint(
+        self, wait_interval_seconds=3.0, wait_timeout_seconds=90.0, protocol="http", warn=True
+    ):
+        if not self._external_endpoint_ports.get(protocol):
+            self.reload()
+            internal_port = self._get_runtime_properties().get(self._external_endpoint_internal_port_map[protocol])
+            if internal_port:
+                self._external_endpoint_ports[protocol] = internal_port
+        if not self._external_endpoint_ports.get(protocol):
+            if warn:
+                LoggerRoot.get_base_logger().warning("No external {} endpoints have been requested".format(protocol))
+            return None
+        start_time = time.time()
+        while True:
+            self.reload()
+            runtime_props = self._get_runtime_properties()
+            endpoint, browser_endpoint = None, None
+            if protocol == "http":
+                endpoint = runtime_props.get("endpoint")
+                browser_endpoint = runtime_props.get("browser_endpoint")
+            elif protocol == "tcp":
+                health_check = runtime_props.get("upstream_task_port")
+                if health_check:
+                    endpoint = (
+                        runtime_props.get(self._external_endpoint_address_map[protocol])
+                        + ":"
+                        + str(runtime_props.get(self._external_endpoint_port_map[protocol]))
+                    )
+            if endpoint or browser_endpoint:
+                return {
+                    "endpoint": endpoint,
+                    "browser_endpoint": browser_endpoint,
+                    "port": self._external_endpoint_ports[protocol],
+                    "protocol": protocol,
+                }
+            if time.time() >= start_time + wait_timeout_seconds:
+                if warn:
+                    LoggerRoot.get_base_logger().warning(
+                        "Timeout exceeded while waiting for {} endpoint".format(protocol)
+                    )
+                return None
+            time.sleep(wait_interval_seconds)
+
+    def list_external_endpoints(self, protocol=None):
+        # type: (Optional[str]) -> List[Dict]
+        """
+        List all external endpoints assigned
+
+        :param protocol: If None, list all external endpoints. Otherwise, only list endpoints
+            that use this protocol
+
+        :return: A list of dictionaries. Each dictionary contains the following values:
+
+          - endpoint - raw endpoint. One might need to authenticate in order to use this endpoint
+          - browser_endpoint - endpoint to be used in browser. Authentication will be handled via the browser
+          - port - the port exposed by the application
+          - protocol - the protocol used by the endpoint
+        """
+        Session.verify_feature_set("advanced")
+        runtime_props = self._get_runtime_properties()
+        results = []
+        protocols = [protocol] if protocol is not None else ["http", "tcp"]
+        for protocol in protocols:
+            internal_port = runtime_props.get(self._external_endpoint_internal_port_map[protocol])
+            if internal_port:
+                self._external_endpoint_ports[protocol] = internal_port
+            else:
+                continue
+            endpoint, browser_endpoint = None, None
+            if protocol == "http":
+                endpoint = runtime_props.get("endpoint")
+                browser_endpoint = runtime_props.get("browser_endpoint")
+            elif protocol == "tcp":
+                health_check = runtime_props.get("upstream_task_port")
+                if health_check:
+                    endpoint = (
+                        runtime_props.get(self._external_endpoint_address_map[protocol])
+                        + ":"
+                        + str(runtime_props.get(self._external_endpoint_port_map[protocol]))
+                    )
+            if endpoint or browser_endpoint:
+                results.append(
+                    {
+                        "endpoint": endpoint,
+                        "browser_endpoint": browser_endpoint,
+                        "port": internal_port,
+                        "protocol": protocol,
+                    }
+                )
+        return results
+
     @classmethod
     def create(
             cls,
@@ -876,18 +1176,19 @@ class Task(_Task):
         :param task_name: Set the name of the remote task. Required if base_task_id is None.
         :param task_type: Optional, The task type to be created. Supported values: 'training', 'testing', 'inference',
             'data_processing', 'application', 'monitor', 'controller', 'optimizer', 'service', 'qc', 'custom'
-        :param repo: Remote URL for the repository to use, or path to local copy of the git repository
-            Example: 'https://github.com/allegroai/clearml.git' or '~/project/repo'
+        :param repo: Remote URL for the repository to use, or path to local copy of the git repository.
+            Example: 'https://github.com/allegroai/clearml.git' or '~/project/repo'. If ``repo`` is specified, then
+            the ``script`` parameter must also be specified
         :param branch: Select specific repository branch/tag (implies the latest commit from the branch)
         :param commit: Select specific commit ID to use (default: latest commit,
-            or when used with local repository matching the local commit id)
+            or when used with local repository matching the local commit ID)
         :param script: Specify the entry point script for the remote execution. When used in tandem with
             remote git repository the script should be a relative path inside the repository,
             for example: './source/train.py' . When used with local repository path it supports a
             direct path to a file inside the local repository itself, for example: '~/project/source/train.py'
         :param working_directory: Working directory to launch the script from. Default: repository root folder.
             Relative to repo root or local folder.
-        :param packages: Manually specify a list of required packages. Example: ["tqdm>=2.1", "scikit-learn"]
+        :param packages: Manually specify a list of required packages. Example: ``["tqdm>=2.1", "scikit-learn"]``
             or `True` to automatically create requirements
             based on locally installed packages (repository must be local).
         :param requirements_file: Specify requirements.txt file to install when setting the session.
@@ -1047,7 +1348,7 @@ class Task(_Task):
     ):
         # type: (...) -> List[TaskInstance]
         """
-        Get a list of Tasks objects matching the queries/filters
+        Get a list of Tasks objects matching the queries/filters:
 
         - A list of specific Task IDs.
         - Filter Tasks based on specific fields:
@@ -1370,7 +1671,7 @@ class Task(_Task):
 
         .. note::
            A worker daemon must be listening at the queue for the worker to fetch the Task and execute it,
-           see `ClearML Agent <../clearml_agent>`_ in the ClearML Documentation.
+           see "ClearML Agent" in the ClearML Documentation.
 
         :param Task/str task: The Task to enqueue. Specify a Task object or  Task ID.
         :param str queue_name: The name of the queue. If not specified, then ``queue_id`` must be specified.
@@ -1583,7 +1884,7 @@ class Task(_Task):
             While by setting `name='Train'` the connected dictionary will be under the Train section in the hyperparameters section.
 
         :param ignore_remote_overrides: If True, ignore UI/backend overrides when running remotely.
-        Default is False, meaning that any changes made in the UI/backend will be applied in remote execution.
+            Default is False, meaning that any changes made in the UI/backend will be applied in remote execution.
 
         :return: It will return the same object that was passed as the `mutable` argument to the method, except if the type of the object is dict.
                  For dicts the :meth:`Task.connect` will return the dict decorated as a `ProxyDictPostWrite`.
@@ -1631,7 +1932,7 @@ class Task(_Task):
 
         :param packages: The list of packages or the path to the requirements.txt file.
 
-            Example: ["tqdm>=2.1", "scikit-learn"] or "./requirements.txt" or ""
+            Example: ``["tqdm>=2.1", "scikit-learn"]`` or ``"./requirements.txt"`` or ``""``
             Use an empty string (packages="") to clear the requirements section (remote execution will use
                 requirements.txt from the git repository if the file exists)
         """
@@ -1657,7 +1958,7 @@ class Task(_Task):
         Supports both git repo url link, and local repository path (automatically converted into the remote
         git/commit as is currently checkout).
         Example remote url: "https://github.com/user/repo.git".
-        Example local repo copy: "./repo" -> will automatically store the remote
+        Example local repo copy: "./repo" - will automatically store the remote
         repo url and commit ID based on the locally cloned copy.
         When executing remotely, this call will not override the repository data (it is ignored)
 
@@ -1735,7 +2036,7 @@ class Task(_Task):
         :param str description: Configuration section description (text). default: None
 
         :param bool ignore_remote_overrides: If True, ignore UI/backend overrides when running remotely.
-        Default is False, meaning that any changes made in the UI/backend will be applied in remote execution.
+            Default is False, meaning that any changes made in the UI/backend will be applied in remote execution.
 
         :return: If a dictionary is specified, then a dictionary is returned. If pathlib2.Path / string is
             specified, then a path to a local configuration file is returned. Configuration object.
@@ -1921,8 +2222,16 @@ class Task(_Task):
         """
         return self._get_logger(auto_connect_streams=self._log_to_backend)
 
-    def launch_multi_node(self, total_num_nodes, port=29500, queue=None, wait=False, addr=None):
-        # type: (int, Optional[int], Optional[str], bool, Optional[str]) -> dict
+    def launch_multi_node(
+        self,
+        total_num_nodes,  # type: int
+        port=29500,  # type: Optional[int]
+        queue=None,  # type: Optional[str]
+        wait=False,  # type: bool
+        addr=None,  # type: Optional[str]
+        devices=None,  # type: Optional[Union[int, Sequence[int]]]
+        hide_children=False  # bool
+    ):
         """
         Enqueue multiple clones of the current task to a queue, allowing the task
         to be ran by multiple workers in parallel. Each task running this way is called a node.
@@ -1996,6 +2305,9 @@ class Task(_Task):
             parameter will be set to the one defined in ``MASTER_ADDR``. If neither environment variables exist,
             the value passed to the parameter will be used. If this value is None (default), the private IP of
             the machine the master node is running on will be used.
+        :param devices: The devices to use. This can be a positive number indicating the number of devices to use,
+            a sequence of indices or the value ``-1`` to indicate all available devices should be used.
+        :param hide_children: If True, the children tasks will be hidden. Otherwise, they will be visible in the UI
 
         :return: A dictionary containing relevant information regarding the multi node run. This dictionary has the following entries:
 
@@ -2006,9 +2318,12 @@ class Task(_Task):
           - `node_rank` - the rank of the current node (master has rank 0)
           - `wait` - if True, the master node will wait for the other nodes to start
         """
+
         def set_launch_multi_node_runtime_props(task, conf):
             # noinspection PyProtectedMember
-            task._set_runtime_properties({"{}/{}".format(self._launch_multi_node_section, k): v for k, v in conf.items()})
+            task._set_runtime_properties(
+                {"{}/{}".format(self._launch_multi_node_section, k): v for k, v in conf.items()}
+            )
 
         if total_num_nodes < 1:
             raise UsageError("total_num_nodes needs to be at least 1")
@@ -2024,6 +2339,7 @@ class Task(_Task):
             ),
             "node_rank": 0,
             "wait": wait,
+            "devices": devices
         }
         editable_conf = {"total_num_nodes": total_num_nodes, "queue": queue}
         editable_conf = self.connect(editable_conf, name=self._launch_multi_node_section)
@@ -2033,23 +2349,27 @@ class Task(_Task):
         runtime_properties = self._get_runtime_properties()
         remote_node_rank = runtime_properties.get("{}/node_rank".format(self._launch_multi_node_section))
 
+        current_conf = master_conf
         if remote_node_rank:
             # self is a child node, build the conf from the runtime proprerties
             current_conf = {
                 entry: runtime_properties.get("{}/{}".format(self._launch_multi_node_section, entry))
                 for entry in master_conf.keys()
             }
-        else:
+        elif os.environ.get("CLEARML_MULTI_NODE_MASTER") is None:
             nodes_to_wait = []
             # self is the master node, enqueue the other nodes
             set_launch_multi_node_runtime_props(self, master_conf)
-            current_conf = master_conf
             for node_rank in range(1, master_conf.get("total_num_nodes", total_num_nodes)):
-                node = self.clone(source_task=self)
+                node = self.clone(source_task=self, parent=self.id)
                 node_conf = copy.deepcopy(master_conf)
                 node_conf["node_rank"] = node_rank
                 set_launch_multi_node_runtime_props(node, node_conf)
-                node.set_system_tags(node.get_system_tags() + [self._launch_multi_node_instance_tag])
+                node.set_system_tags(
+                    node.get_system_tags()
+                    + [self._launch_multi_node_instance_tag]
+                    + ([self.__hidden_tag] if hide_children else [])
+                )
                 if master_conf.get("queue"):
                     Task.enqueue(node, queue_name=master_conf["queue"])
                 else:
@@ -2064,16 +2384,42 @@ class Task(_Task):
                         Task.TaskStatusEnum.stopped,
                         Task.TaskStatusEnum.closed,
                         Task.TaskStatusEnum.failed,
-                        Task.TaskStatusEnum.in_progress
+                        Task.TaskStatusEnum.in_progress,
                     ),
-                    check_interval_sec=10
+                    check_interval_sec=10,
                 )
                 self.log.info("Node with task ID {} and rank {} detected".format(node_to_wait.id, rank))
+            os.environ["CLEARML_MULTI_NODE_MASTER"] = "1"
+
+        num_devices = 1
+        if devices is not None:
+            try:
+                num_devices = int(devices)
+            except TypeError:
+                try:
+                    num_devices = len(devices)
+                except Exception as ex:
+                    raise ValueError("Failed parsing number of devices: {}".format(ex))
+            except ValueError as ex:
+                raise ValueError("Failed parsing number of devices: {}".format(ex))
+            if num_devices < 0:
+                try:
+                    import torch
+
+                    num_devices = torch.cuda.device_count()
+                except ImportError:
+                    raise ImportError(
+                        "Could not import `torch` while finding the number of devices. "
+                        "Please install it or set `devices` to a value different than -1"
+                    )
 
         os.environ["MASTER_ADDR"] = current_conf.get("master_addr", "")
         os.environ["MASTER_PORT"] = str(current_conf.get("master_port", ""))
-        os.environ["WORLD_SIZE"] = str(current_conf.get("total_num_nodes", ""))
-        os.environ["RANK"] = str(current_conf.get("node_rank", ""))
+        os.environ["RANK"] = str(
+            current_conf.get("node_rank", 0) * num_devices + int(os.environ.get("LOCAL_RANK", "0"))
+        )
+        os.environ["NODE_RANK"] = str(current_conf.get("node_rank", ""))
+        os.environ["WORLD_SIZE"] = str(current_conf.get("total_num_nodes", total_num_nodes) * num_devices)
 
         return current_conf
 
@@ -2101,6 +2447,26 @@ class Task(_Task):
         self.flush(wait_for_uploads=True)
         # mark task as stopped
         self.stopped(force=force, status_message=str(status_message) if status_message else None)
+
+    def mark_stop_request(self, force=False, status_message=None):
+        # type: (bool, Optional[str]) -> ()
+        """
+        Request a task to stop. this will not change the task status
+        but mark a request for an agent or SDK to actually stop the Task.
+        This will trigger the Task's abort callback, and at the end will
+        change the task status to stopped and kill the Task's processes
+
+        Notice: calling this on your own Task, will cause
+        the watchdog to call the on_abort callback and kill the process
+
+        :param bool force: If not True, call fails if the task status is not 'in_progress'
+        :param str status_message: Optional, add status change message to the stop request.
+            This message will be stored as status_message on the Task's info panel
+        """
+        # flush any outstanding logs
+        self.flush(wait_for_uploads=True)
+        # request task stop
+        return self.stop_request(self, force=force, status_message=status_message)
 
     def flush(self, wait_for_uploads=False):
         # type: (bool) -> bool
@@ -2303,7 +2669,7 @@ class Task(_Task):
             artifact_object,  # type: Union[str, Mapping, pandas.DataFrame, numpy.ndarray, Image.Image, Any]
             metadata=None,  # type: Optional[Mapping]
             delete_after_upload=False,  # type: bool
-            auto_pickle=True,  # type: bool
+            auto_pickle=None,  # type: Optional[bool]
             preview=None,  # type: Any
             wait_on_upload=False,  # type: bool
             extension_name=None,  # type: Optional[str]
@@ -2338,9 +2704,10 @@ class Task(_Task):
             - ``True`` - Delete the local copy of the artifact.
             - ``False`` - Do not delete. (default)
 
-        :param bool auto_pickle: If True (default) and the artifact_object is not one of the following types:
+        :param bool auto_pickle: If True and the artifact_object is not one of the following types:
             pathlib2.Path, dict, pandas.DataFrame, numpy.ndarray, PIL.Image, url (string), local_file (string),
-            the artifact_object will be pickled and uploaded as pickle file artifact (with file extension .pkl)
+            the artifact_object will be pickled and uploaded as pickle file artifact (with file extension .pkl).
+            If set to None (default) the sdk.development.artifacts.auto_pickle configuration value will be used.
 
         :param Any preview: The artifact preview
 
@@ -2357,7 +2724,7 @@ class Task(_Task):
           - PIL.Image - whatever extensions PIL supports (default ``.png``)
           - In case the ``serialization_function`` argument is set - any extension is supported
 
-        :param Callable[Any, Union[bytes, bytearray]] serialization_function: A serialization function that takes one
+        :param serialization_function: A serialization function that takes one
             parameter of any type which is the object to be serialized. The function should return
             a `bytes` or `bytearray` object, which represents the serialized object. Note that the object will be
             immediately serialized using this function, thus other serialization methods will not be used
@@ -2470,7 +2837,7 @@ class Task(_Task):
     def get_models(self):
         # type: () -> Mapping[str, Sequence[Model]]
         """
-        Return a dictionary with {'input': [], 'output': []} loaded/stored models of the current Task
+        Return a dictionary with ``{'input': [], 'output': []}`` loaded/stored models of the current Task
         Input models are files loaded in the task, either manually or automatically logged
         Output models are files stored in the task, either manually or automatically logged.
         Automatically logged frameworks are for example: TensorFlow, Keras, PyTorch, ScikitLearn(joblib) etc.
@@ -3106,7 +3473,7 @@ class Task(_Task):
             Defaults to ('failed').
         :param check_interval_sec: Interval in seconds between two checks. Defaults to 60 seconds.
 
-        :raise: RuntimeError if the status is one of {raise_on_status}.
+        :raise: RuntimeError if the status is one of ``{raise_on_status}``.
         """
         stopped_status = list(status) + (list(raise_on_status) if raise_on_status else [])
         while self.status not in stopped_status:
@@ -4101,7 +4468,10 @@ class Task(_Task):
             )
         )
         self.flush(wait_for_uploads=True)
-        self.stopped(status_reason='USER ABORTED')
+
+        # if running remotely, we want the daemon to kill us
+        if self.running_locally():
+            self.stopped(status_reason='USER ABORTED')
 
         if self._dev_worker:
             self._dev_worker.unregister()

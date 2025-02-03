@@ -1,6 +1,6 @@
 """
-ClearML - Artificial Intelligence Version Control
-https://github.com/allegroai/clearml
+ClearML Inc
+https://github.com/clearml/clearml
 """
 
 import os.path
@@ -21,8 +21,7 @@ long_description = read_text(os.path.join(here, 'README.md'))
 # fix github, dark logo hack.
 long_description = long_description.replace(
     """<img align="center" src="docs/clearml-logo.svg#gh-light-mode-only" alt="Clear|ML"><img align="center" src="docs/clearml-logo-dark.svg#gh-dark-mode-only" alt="Clear|ML">""",  # noqa
-    """<a href="https://app.clear.ml"><img src="https://github.com/allegroai/clearml/blob/master/docs/clearml-logo.svg?raw=true" width="250px"></a>""",  # noqa
-    1
+    """<a href="https://clear.ml"><img src="https://raw.githubusercontent.com/clearml/clearml/refs/heads/master/docs/clearml-logo.svg" width="250px"></a>""",  # noqa
 )
 
 
@@ -46,7 +45,7 @@ setup(
     long_description=long_description,
     long_description_content_type='text/markdown',
     # The project's main homepage.
-    url='https://github.com/allegroai/clearml',
+    url='https://github.com/clearml/clearml',
     author='ClearML',
     author_email='support@clear.ml',
     license='Apache License 2.0',
@@ -71,6 +70,7 @@ setup(
         'Programming Language :: Python :: 3.10',
         'Programming Language :: Python :: 3.11',
         'Programming Language :: Python :: 3.12',
+        'Programming Language :: Python :: 3.13',
         'License :: OSI Approved :: Apache Software License',
     ],
     keywords='clearml trains development machine deep learning version control machine-learning machinelearning '
@@ -87,6 +87,11 @@ setup(
         'gs': [
             'google-cloud-storage>=1.13.2',
         ],
+        'router': [
+            'fastapi>=0.115.2',
+            'uvicorn>=0.31.1',
+            'httpx>=0.27.2'
+        ]
     },
     package_data={
         'clearml': ['config/default/*.conf', 'backend_api/config/default/*.conf']

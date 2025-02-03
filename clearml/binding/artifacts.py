@@ -28,6 +28,7 @@ from ..storage.helper import remote_driver_schemes
 from ..storage.util import sha256sum, format_size, get_common_path
 from ..utilities.process.mp import SafeEvent, ForkSafeRLock
 from ..utilities.proxy_object import LazyEvalWrapper
+from ..config import deferred_config, config
 
 try:
     import pandas as pd
@@ -256,12 +257,16 @@ class Artifacts(object):
     max_preview_size_bytes = 65536
 
     _flush_frequency_sec = 300.
+    _max_tmp_file_replace_attemps = 3
     # notice these two should match
     _save_format = '.csv.gz'
     _compression = 'gzip'
     # hashing constants
     _hash_block_size = 65536
     _pd_artifact_type = 'data-audit-table'
+    _default_pandas_dataframe_extension_name = deferred_config(
+        "development.artifacts.default_pandas_dataframe_extension_name", None
+    )
 
     class _ProxyDictWrite(dict):
         """ Dictionary wrapper that updates an arguments instance on any item set in the dictionary """
@@ -361,7 +366,7 @@ class Artifacts(object):
         metadata=None,  # type: Optional[dict]
         preview=None,  # type: Optional[str]
         delete_after_upload=False,  # type: bool
-        auto_pickle=True,  # type: bool
+        auto_pickle=None,  # type: Optional[bool]
         wait_on_upload=False,  # type: bool
         extension_name=None,  # type: Optional[str]
         serialization_function=None,  # type: Optional[Callable[[Any], Union[bytes, bytearray]]]
@@ -376,6 +381,9 @@ class Artifacts(object):
 
         if name in self._artifacts_container:
             raise ValueError("Artifact by the name of {} is already registered, use register_artifact".format(name))
+
+        if auto_pickle is None:
+            auto_pickle = bool(config.get("development.artifacts.auto_pickle", False))
 
         # cast preview to string
         if preview is not None and not (isinstance(preview, bool) and preview is False):
@@ -464,19 +472,23 @@ class Artifacts(object):
                 artifact_type_data.content_type = "text/csv"
                 np.savetxt(local_filename, artifact_object, delimiter=",")
             delete_after_upload = True
-        elif pd and isinstance(artifact_object, pd.DataFrame) \
-                and (isinstance(artifact_object.index, pd.MultiIndex) or
-                     isinstance(artifact_object.columns, pd.MultiIndex)):
-            store_as_pickle = True
         elif pd and isinstance(artifact_object, pd.DataFrame):
             artifact_type = "pandas"
             artifact_type_data.preview = preview or str(artifact_object.__repr__())
+            # we are making sure self._default_pandas_dataframe_extension_name is not deferred
+            extension_name = extension_name or str(self._default_pandas_dataframe_extension_name or "")
             override_filename_ext_in_uri = get_extension(
                 extension_name, [".csv.gz", ".parquet", ".feather", ".pickle"], ".csv.gz", artifact_type
             )
             override_filename_in_uri = name
-            local_filename = self._push_temp_file(prefix=quote(name, safe="") + '.', suffix=override_filename_ext_in_uri)
-            if override_filename_ext_in_uri == ".csv.gz":
+            local_filename = self._push_temp_file(
+                prefix=quote(name, safe="") + ".", suffix=override_filename_ext_in_uri
+            )
+            if (
+                isinstance(artifact_object.index, pd.MultiIndex) or isinstance(artifact_object.columns, pd.MultiIndex)
+            ) and not extension_name:
+                store_as_pickle = True
+            elif override_filename_ext_in_uri == ".csv.gz":
                 artifact_type_data.content_type = "text/csv"
                 self._store_compressed_pd_csv(artifact_object, local_filename)
             elif override_filename_ext_in_uri == ".parquet":
@@ -1127,7 +1139,20 @@ class Artifacts(object):
             temp_folder, prefix, suffix = self._temp_files_lookup.pop(local_filename)
             fd, temp_filename = mkstemp(prefix=prefix, suffix=suffix)
             os.close(fd)
-            os.replace(local_filename, temp_filename)
+            for i in range(self._max_tmp_file_replace_attemps):
+                try:
+                    os.replace(local_filename, temp_filename)
+                    break
+                except PermissionError:
+                    LoggerRoot.get_base_logger().warning(
+                        "Failed to replace {} with {}. Attemps left: {}".format(
+                            local_filename, temp_filename, self._max_tmp_file_replace_attemps - i
+                        )
+                    )
+            else:
+                # final attempt, and if it fails, throw an exception.
+                # exception could be thrown on some Windows systems
+                os.replace(local_filename, temp_filename)
             local_filename = temp_filename
             os.rmdir(temp_folder)
         except Exception as ex:

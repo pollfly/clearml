@@ -324,11 +324,22 @@ class BaseModel(object):
     def task(self):
         # type: () -> str
         """
-        Return the creating task ID
+        Return the task ID connected to this model. If not task is connected,
+        return the ID of the task that originally created this model.
 
         :return: The Task ID (str)
         """
-        return self._task.id if self._task else self._get_base_model().task
+        return self._task.id if self._task else self.original_task
+
+    @property
+    def original_task(self):
+        # type: () -> str
+        """
+        Return the ID of the task that created this model.
+
+        :return: The Task ID (str)
+        """
+        return self._get_base_model().task
 
     @property
     def url(self):
@@ -504,10 +515,10 @@ class BaseModel(object):
         :param mode: Multiple histograms mode, stack / group / relative. Default is 'group'.
         :param data_args: optional dictionary for data configuration, passed directly to plotly
             See full details on the supported configuration: https://plotly.com/javascript/reference/bar/
-            example: data_args={'orientation': 'h', 'marker': {'color': 'blue'}}
+            example: ``data_args={'orientation': 'h', 'marker': {'color': 'blue'}}``
         :param extra_layout: optional dictionary for layout configuration, passed directly to plotly
             See full details on the supported configuration: https://plotly.com/javascript/reference/bar/
-            example: extra_layout={'xaxis': {'type': 'date', 'range': ['2020-01-01', '2020-01-31']}}
+            example: ``extra_layout={'xaxis': {'type': 'date', 'range': ['2020-01-01', '2020-01-31']}}``
         """
         self._init_reporter()
 
@@ -565,7 +576,7 @@ class BaseModel(object):
         :param mode: Multiple histograms mode, stack / group / relative. Default is 'group'.
         :param extra_layout: optional dictionary for layout configuration, passed directly to plotly
             See full details on the supported configuration: https://plotly.com/javascript/reference/layout/
-            example: extra_layout={'showlegend': False, 'plot_bgcolor': 'yellow'}
+            example: ``extra_layout={'showlegend': False, 'plot_bgcolor': 'yellow'}``
         """
         self._init_reporter()
         return self.report_histogram(
@@ -619,7 +630,7 @@ class BaseModel(object):
         :param url: A URL to the location of csv file.
         :param extra_layout: optional dictionary for layout configuration, passed directly to plotly
             See full details on the supported configuration: https://plotly.com/javascript/reference/layout/
-            example: extra_layout={'height': 600}
+            example: ``extra_layout={'height': 600}``
         """
         mutually_exclusive(
             UsageError, _check_none=True,
@@ -647,7 +658,13 @@ class BaseModel(object):
             reporter_table = table.fillna(str(np.nan))
             replace("NaN", np.nan, math.nan if six.PY3 else float("nan"))
             replace("Inf", np.inf, math.inf if six.PY3 else float("inf"))
-            replace("-Inf", -np.inf, np.NINF, -math.inf if six.PY3 else -float("inf"))
+            minus_inf = [-np.inf, -math.inf if six.PY3 else -float("inf")]
+            try:
+                minus_inf.append(np.NINF)
+            except AttributeError:
+                # NINF has been removed in numpy>2.0
+                pass
+            replace("-Inf", *minus_inf)
         self._init_reporter()
         return self._reporter.report_table(
             title=title,
@@ -691,7 +708,7 @@ class BaseModel(object):
         :param str comment: A comment displayed with the plot, underneath the title.
         :param dict extra_layout: optional dictionary for layout configuration, passed directly to plotly
             See full details on the supported configuration: https://plotly.com/javascript/reference/scatter/
-            example: extra_layout={'xaxis': {'type': 'date', 'range': ['2020-01-01', '2020-01-31']}}
+            example: ``extra_layout={'xaxis': {'type': 'date', 'range': ['2020-01-01', '2020-01-31']}}``
         """
         self._init_reporter()
 
@@ -764,7 +781,7 @@ class BaseModel(object):
         :param str comment: A comment displayed with the plot, underneath the title.
         :param dict extra_layout: optional dictionary for layout configuration, passed directly to plotly
             See full details on the supported configuration: https://plotly.com/javascript/reference/scatter/
-            example: extra_layout={'xaxis': {'type': 'date', 'range': ['2020-01-01', '2020-01-31']}}
+            example: ``extra_layout={'xaxis': {'type': 'date', 'range': ['2020-01-01', '2020-01-31']}}``
         """
         self._init_reporter()
 
@@ -801,12 +818,13 @@ class BaseModel(object):
             comment=None,  # type: Optional[str]
             extra_layout=None  # type: Optional[dict]
     ):
+        # type: (...) -> ()
         """
         For explicit reporting, plot a 3d scatter graph (with markers).
 
         :param str title: The title (metric) of the plot.
         :param str series: The series name (variant) of the reported scatter plot.
-        :param Union[numpy.ndarray, list] scatter: The scatter data.
+        :param scatter: The scatter data.
             list of (pairs of x,y,z), list of series [[(x1,y1,z1)...]], or numpy.ndarray
         :param int iteration: The reported iteration / step.
         :param str xaxis: The x-axis title. (Optional)
@@ -832,7 +850,7 @@ class BaseModel(object):
         :param str comment: A comment displayed with the plot, underneath the title.
         :param dict extra_layout: optional dictionary for layout configuration, passed directly to plotly
             See full details on the supported configuration: https://plotly.com/javascript/reference/scatter3d/
-            example: extra_layout={'xaxis': {'type': 'date', 'range': ['2020-01-01', '2020-01-31']}}
+            example: ``extra_layout={'xaxis': {'type': 'date', 'range': ['2020-01-01', '2020-01-31']}}``
         """
         self._init_reporter()
 
@@ -911,7 +929,7 @@ class BaseModel(object):
         :param str comment: A comment displayed with the plot, underneath the title.
         :param dict extra_layout: optional dictionary for layout configuration, passed directly to plotly
             See full details on the supported configuration: https://plotly.com/javascript/reference/heatmap/
-            example: extra_layout={'xaxis': {'type': 'date', 'range': ['2020-01-01', '2020-01-31']}}
+            example: ``extra_layout={'xaxis': {'type': 'date', 'range': ['2020-01-01', '2020-01-31']}}``
         """
         self._init_reporter()
 
@@ -962,7 +980,7 @@ class BaseModel(object):
         :param bool yaxis_reversed: If False, 0,0 is at the bottom left corner. If True, 0,0 is at the top left corner
         :param dict extra_layout: optional dictionary for layout configuration, passed directly to plotly
             See full details on the supported configuration: https://plotly.com/javascript/reference/heatmap/
-            example: extra_layout={'xaxis': {'type': 'date', 'range': ['2020-01-01', '2020-01-31']}}
+            example: ``extra_layout={'xaxis': {'type': 'date', 'range': ['2020-01-01', '2020-01-31']}}``
         """
         self._init_reporter()
         return self.report_confusion_matrix(
@@ -1019,7 +1037,7 @@ class BaseModel(object):
         :param str comment: A comment displayed with the plot, underneath the title.
         :param dict extra_layout: optional dictionary for layout configuration, passed directly to plotly
             See full details on the supported configuration: https://plotly.com/javascript/reference/surface/
-            example: extra_layout={'xaxis': {'type': 'date', 'range': ['2020-01-01', '2020-01-31']}}
+            example: ``extra_layout={'xaxis': {'type': 'date', 'range': ['2020-01-01', '2020-01-31']}}``
         """
         self._init_reporter()
 
