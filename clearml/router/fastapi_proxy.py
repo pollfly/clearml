@@ -87,7 +87,7 @@ class FastAPIProxy:
                 url=url,
                 headers=dict(request.headers),
                 content=await request.body(),
-                params=request.query_params
+                params=request.query_params,
             )
         else:
             request = session.build_request(
@@ -96,7 +96,7 @@ class FastAPIProxy:
                 content=request.stream(),
                 params=request.query_params,
                 headers=dict(request.headers),
-                timeout=httpx.USE_CLIENT_DEFAULT
+                timeout=httpx.USE_CLIENT_DEFAULT,
             )
             proxied_response = await session.send(
                 request=request,
